@@ -295,6 +295,11 @@ void FIDO2Device::handle_cbor(uint32_t channel_id,
 
     case CTAP2_CMD_GET_ASSERTION:
       response = handle_get_assertion(cbor_data);
+      // 如果返回空响应，表示没有凭据，静默不响应让其他设备处理
+      if (response.empty()) {
+        spdlog::debug("CTAP2: 静默模式 - 不发送响应");
+        return;
+      }
       break;
 
     case CTAP2_CMD_CLIENT_PIN:
@@ -691,6 +696,40 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
 
   spdlog::debug("CTAP2: RP ID = {}", req.rp_id);
 
+  // 计算 rp_id_hash（提前检查凭据）
+  std::vector<uint8_t> rp_id_bytes(req.rp_id.begin(), req.rp_id.end());
+  std::vector<uint8_t> rp_id_hash = CryptoUtils::sha256(rp_id_bytes);
+
+  // 先检查是否有匹配的凭据（在验证用户之前）
+  // 这样如果没有凭据，可以静默让其他设备处理
+  bool has_credential = false;
+
+  if (!req.allow_list.empty()) {
+    for (const auto& allowed_id : req.allow_list) {
+      auto it = credentials_.find(allowed_id);
+      if (it != credentials_.end() && it->second.app_id == rp_id_hash) {
+        has_credential = true;
+        break;
+      }
+    }
+  } else {
+    // 检查 resident keys
+    for (const auto& [cred_id, cred] : credentials_) {
+      if (cred.app_id == rp_id_hash) {
+        has_credential = true;
+        break;
+      }
+    }
+  }
+
+  if (!has_credential) {
+    spdlog::info("CTAP2: 没有匹配凭据 (rp_id={})，静默让其他设备处理",
+                 req.rp_id);
+    // 返回空响应，让 CTAPHID 层不发送响应
+    // 这样浏览器会继续等待其他设备
+    return {};
+  }
+
   // 设置当前 RP ID（用于 D-Bus 模式）
   current_rp_id_ = req.rp_id;
 
@@ -702,11 +741,7 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
 
   spdlog::info("CTAP2: ✅ 用户验证通过");
 
-  // 计算 rp_id_hash
-  std::vector<uint8_t> rp_id_bytes(req.rp_id.begin(), req.rp_id.end());
-  std::vector<uint8_t> rp_id_hash = CryptoUtils::sha256(rp_id_bytes);
-
-  // 查找匹配的凭据
+  // 查找匹配的凭据（rp_id_hash 已在上面计算）
   StoredCredential* found_cred = nullptr;
   std::vector<uint8_t> found_cred_id;
 
@@ -733,11 +768,6 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
         break;
       }
     }
-  }
-
-  if (!found_cred) {
-    spdlog::warn("CTAP2: 未找到匹配凭据 (rp_id={})", req.rp_id);
-    return {CTAP2_ERR_NO_CREDENTIALS};
   }
 
   // 重建用户密钥
