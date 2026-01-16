@@ -322,9 +322,36 @@ int main(int argc, char* argv[]) {
     spdlog::info("等待验证请求...");
     spdlog::info("-----------------------------------");
 
+    // 心跳检测参数
+    constexpr int HEARTBEAT_INTERVAL_MS = 3000;  // 心跳间隔 3 秒
+    constexpr int HEARTBEAT_FAIL_THRESHOLD = 3;  // 连续失败 3 次断开
+    int heartbeat_fail_count = 0;
+    auto last_heartbeat = std::chrono::steady_clock::now();
+
     // 运行事件循环
     while (g_running.load() && client.is_connected()) {
       client.run();
+
+      // 心跳检测
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         now - last_heartbeat)
+                         .count();
+
+      if (elapsed >= HEARTBEAT_INTERVAL_MS) {
+        last_heartbeat = now;
+        if (client.ping()) {
+          heartbeat_fail_count = 0;
+        } else {
+          heartbeat_fail_count++;
+          spdlog::warn("心跳检测失败 ({}/{})", heartbeat_fail_count,
+                       HEARTBEAT_FAIL_THRESHOLD);
+          if (heartbeat_fail_count >= HEARTBEAT_FAIL_THRESHOLD) {
+            spdlog::error("Daemon 无响应，断开连接并重试...");
+            break;
+          }
+        }
+      }
     }
 
     client.disconnect();

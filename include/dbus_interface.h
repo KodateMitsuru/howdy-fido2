@@ -155,6 +155,9 @@ class DBusClient {
   bool load_credentials(const std::vector<uint8_t>& sealed_data);
   std::vector<uint8_t> get_credentials();
 
+  // 心跳检测
+  bool ping();
+
  private:
   std::unique_ptr<sdbus::IConnection> connection_;
   std::unique_ptr<sdbus::IProxy> proxy_;

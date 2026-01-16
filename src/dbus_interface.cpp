@@ -68,6 +68,9 @@ bool DBusServer::start() {
             sdbus::registerMethod("GetCredentials")
                 .implementedAs([this]() { return handle_get_credentials(); })
                 .withOutputParamNames("sealed_data"),
+            sdbus::registerMethod("Ping")
+                .implementedAs([]() { return true; })
+                .withOutputParamNames("alive"),
             sdbus::registerSignal("CredentialsChanged"))
         .forInterface(DBUS_INTERFACE_CRED);
 
@@ -280,18 +283,8 @@ void DBusClient::run() {
 void DBusClient::stop() { running_ = false; }
 
 bool DBusClient::is_service_ready() {
-  if (!proxy_) return false;
-  try {
-    // 尝试调用 GetPendingAuth 来测试服务是否可用
-    std::string operation, rp_id;
-    proxy_->callMethod("GetPendingAuth")
-        .onInterface(DBUS_INTERFACE_AUTH)
-        .storeResultsTo(operation, rp_id);
-    return true;
-  } catch (const sdbus::Error& e) {
-    // 服务未就绪
-    return false;
-  }
+  // 复用 ping() 方法检测服务是否就绪
+  return ping();
 }
 
 std::vector<uint8_t> DBusClient::seal_data(const std::vector<uint8_t>& data) {
@@ -392,6 +385,20 @@ void DBusClient::on_credentials_changed() {
   spdlog::info("D-Bus: 凭据已变更");
   if (cred_changed_cb_) {
     cred_changed_cb_();
+  }
+}
+
+bool DBusClient::ping() {
+  if (!proxy_) return false;
+  try {
+    bool result = false;
+    proxy_->callMethod("Ping")
+        .onInterface(DBUS_INTERFACE_CRED)
+        .storeResultsTo(result);
+    return result;
+  } catch (const sdbus::Error& e) {
+    spdlog::debug("D-Bus: Ping 失败 - {}", e.what());
+    return false;
   }
 }
 
