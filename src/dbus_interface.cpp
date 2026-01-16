@@ -279,6 +279,21 @@ void DBusClient::run() {
 
 void DBusClient::stop() { running_ = false; }
 
+bool DBusClient::is_service_ready() {
+  if (!proxy_) return false;
+  try {
+    // 尝试调用 GetPendingAuth 来测试服务是否可用
+    std::string operation, rp_id;
+    proxy_->callMethod("GetPendingAuth")
+        .onInterface(DBUS_INTERFACE_AUTH)
+        .storeResultsTo(operation, rp_id);
+    return true;
+  } catch (const sdbus::Error& e) {
+    // 服务未就绪
+    return false;
+  }
+}
+
 std::vector<uint8_t> DBusClient::seal_data(const std::vector<uint8_t>& data) {
   if (!proxy_) return {};
   try {
@@ -295,8 +310,12 @@ std::vector<uint8_t> DBusClient::seal_data(const std::vector<uint8_t>& data) {
 }
 
 std::vector<uint8_t> DBusClient::unseal_data(
-    const std::vector<uint8_t>& sealed_data) {
-  if (!proxy_) return {};
+    const std::vector<uint8_t>& sealed_data, bool* service_error) {
+  if (service_error) *service_error = false;
+  if (!proxy_) {
+    if (service_error) *service_error = true;
+    return {};
+  }
   try {
     std::vector<uint8_t> result;
     proxy_->callMethod("UnsealData")
@@ -305,7 +324,17 @@ std::vector<uint8_t> DBusClient::unseal_data(
         .storeResultsTo(result);
     return result;
   } catch (const sdbus::Error& e) {
-    spdlog::error("D-Bus: UnsealData 失败 - {}", e.what());
+    std::string error_name = e.getName();
+    // 检查是否是服务不可用的错误
+    if (error_name.find("ServiceUnknown") != std::string::npos ||
+        error_name.find("NoReply") != std::string::npos ||
+        error_name.find("Timeout") != std::string::npos ||
+        error_name.find("Disconnected") != std::string::npos) {
+      if (service_error) *service_error = true;
+      spdlog::debug("D-Bus: UnsealData 服务未就绪 - {}", e.what());
+    } else {
+      spdlog::error("D-Bus: UnsealData 失败 - {}", e.what());
+    }
     return {};
   }
 }

@@ -129,6 +129,9 @@ class DBusClient {
     return connection_ != nullptr && proxy_ != nullptr;
   }
 
+  // 检查 daemon 服务是否就绪
+  bool is_service_ready();
+
   // 设置回调
   void set_pam_callback(PAMCallback callback) {
     pam_callback_ = std::move(callback);
@@ -143,7 +146,10 @@ class DBusClient {
 
   // TPM 操作（通过 D-Bus 调用 daemon）
   std::vector<uint8_t> seal_data(const std::vector<uint8_t>& data);
-  std::vector<uint8_t> unseal_data(const std::vector<uint8_t>& sealed_data);
+
+  // 解封数据，service_error 指示是否是服务不可用导致的失败
+  std::vector<uint8_t> unseal_data(const std::vector<uint8_t>& sealed_data,
+                                   bool* service_error = nullptr);
 
   // 凭据操作
   bool load_credentials(const std::vector<uint8_t>& sealed_data);

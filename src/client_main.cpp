@@ -264,7 +264,25 @@ int main(int argc, char* argv[]) {
   // 连接重试循环
   while (g_running.load()) {
     if (!client.connect()) {
-      spdlog::warn("无法连接到守护进程，5 秒后重试...");
+      spdlog::warn("无法连接到 D-Bus，5 秒后重试...");
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+      continue;
+    }
+
+    // 等待 daemon 服务就绪
+    spdlog::info("已连接到 D-Bus，等待 daemon 服务...");
+    bool service_ready = false;
+    for (int retry = 0; retry < 30 && g_running.load(); retry++) {
+      if (client.is_service_ready()) {
+        service_ready = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    if (!service_ready) {
+      spdlog::warn("daemon 服务未就绪，5 秒后重试...");
+      client.disconnect();
       std::this_thread::sleep_for(std::chrono::seconds(5));
       continue;
     }
@@ -275,13 +293,23 @@ int main(int argc, char* argv[]) {
     auto sealed_data = cred_file.load();
     if (!sealed_data.empty()) {
       spdlog::info("加载本地凭据 ({} 字节)...", sealed_data.size());
-      // 先解密
-      auto data = client.unseal_data(sealed_data);
+
+      // 尝试解密
+      bool service_error = false;
+      auto data = client.unseal_data(sealed_data, &service_error);
+
       if (data.empty()) {
-        // TPM 解密失败，可能是直接保存的明文
-        spdlog::warn("TPM 解密失败，尝试直接加载...");
+        if (service_error) {
+          // 服务不可用，重新连接
+          spdlog::warn("TPM 服务不可用，重新连接...");
+          client.disconnect();
+          continue;
+        }
+        // 解密失败但服务正常，可能是明文数据
+        spdlog::info("数据非 TPM 加密格式，直接加载...");
         data = sealed_data;
       }
+
       if (client.load_credentials(data)) {
         spdlog::info("凭据已上传到守护进程");
       } else {

@@ -106,25 +106,20 @@ int cmd_info() {
   fmt::print("凭据文件路径: {}\n", path);
 
   if (!fs::exists(path)) {
-    fmt::print("状态: 不存在\n");
-    return 0;
+    fmt::print("文件状态: 不存在\n");
+  } else {
+    auto file_size = fs::file_size(path);
+    fmt::print("文件状态: 存在 ({} 字节)\n", file_size);
   }
-
-  auto stat_info = fs::status(path);
-  auto file_size = fs::file_size(path);
-  auto mod_time = fs::last_write_time(path);
-
-  fmt::print("状态: 存在\n");
-  fmt::print("文件大小: {} 字节\n", file_size);
 
   // 检查 daemon 连接
   howdy::DBusClient client;
-  if (client.connect()) {
-    fmt::print("Daemon: 已连接\n");
+  if (client.connect() && client.is_service_ready()) {
+    fmt::print("Daemon 状态: 已就绪\n");
     fmt::print("TPM 加密: 可用\n");
     client.disconnect();
   } else {
-    fmt::print("Daemon: 未运行\n");
+    fmt::print("Daemon 状态: 未运行\n");
     fmt::print("TPM 加密: 不可用\n");
   }
 
@@ -343,12 +338,12 @@ int main(int argc, char* argv[]) {
 
   // 其他命令需要连接 daemon
   howdy::DBusClient client;
-  bool connected = client.connect();
+  bool connected = client.connect() && client.is_service_ready();
 
   if (cmd == "list") {
     if (!connected) {
       // 尝试不通过 daemon 读取（可能是明文）
-      fmt::print("警告: 无法连接到 daemon，尝试直接读取...\n\n");
+      fmt::print("警告: daemon 服务未就绪，尝试直接读取...\n\n");
     }
     return cmd_list(client);
   }
@@ -357,6 +352,9 @@ int main(int argc, char* argv[]) {
     if (argc < 3) {
       fmt::print(stderr, "错误: show 命令需要指定序号\n");
       return 1;
+    }
+    if (!connected) {
+      fmt::print("警告: daemon 服务未就绪，尝试直接读取...\n\n");
     }
     int index = std::atoi(argv[2]);
     return cmd_show(client, index);
@@ -368,7 +366,8 @@ int main(int argc, char* argv[]) {
       return 1;
     }
     if (!connected) {
-      fmt::print(stderr, "错误: 无法连接到 daemon\n");
+      fmt::print(stderr, "错误: daemon 服务未就绪\n");
+      fmt::print(stderr, "请确保 howdy-fido2-daemon 正在运行\n");
       return 1;
     }
     int index = std::atoi(argv[2]);
@@ -377,7 +376,8 @@ int main(int argc, char* argv[]) {
 
   if (cmd == "clear") {
     if (!connected) {
-      fmt::print(stderr, "错误: 无法连接到 daemon\n");
+      fmt::print(stderr, "错误: daemon 服务未就绪\n");
+      fmt::print(stderr, "请确保 howdy-fido2-daemon 正在运行\n");
       return 1;
     }
     return cmd_clear(client, skip_confirm);
