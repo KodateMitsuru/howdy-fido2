@@ -34,8 +34,6 @@ static int pam_conversation(int num_msg, const struct pam_message** msg,
     switch (m->msg_style) {
       case PAM_PROMPT_ECHO_OFF:
       case PAM_PROMPT_ECHO_ON:
-        // 对于需要输入的提示，返回空字符串
-        // pam_howdy 不需要密码输入，它使用人脸识别
         (*resp)[i].resp = strdup("");
         (*resp)[i].resp_retcode = 0;
         break;
@@ -107,19 +105,15 @@ PAMResult PAMAuthenticator::authenticate(const std::string& username) {
       return PAMResult::ERROR;
     }
 
-    // 设置 PAM 项 - howdy 可能需要这些
     pam_set_item(pamh, PAM_TTY, "/dev/console");
     pam_set_item(pamh, PAM_RHOST, "localhost");
     pam_set_item(pamh, PAM_RUSER, user.c_str());
 
-    // 执行验证 - 不使用 PAM_SILENT，让 howdy 可以正常交互
     spdlog::debug("PAM: 等待验证...");
     ret = pam_authenticate(pamh, 0);
 
     PAMResult result;
     if (ret == PAM_SUCCESS) {
-      // pam_authenticate 成功即可，跳过 pam_acct_mgmt
-      // 因为 pam_howdy 返回 PAM_IGNORE，可能导致账户检查失败
       spdlog::debug("PAM: ✓ 验证成功!");
       result = PAMResult::SUCCESS;
     } else if (ret == PAM_AUTH_ERR) {

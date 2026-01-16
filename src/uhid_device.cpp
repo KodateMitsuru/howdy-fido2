@@ -44,11 +44,10 @@ bool UHIDDevice::create() {
     return true;
   }
 
-  // 打开 UHID 设备
   uhid_fd_ = open("/dev/uhid", O_RDWR | O_CLOEXEC);
   if (uhid_fd_ < 0) {
     spdlog::error("无法打开 /dev/uhid: {}", strerror(errno));
-    spdlog::error("请确保有足够权限或使用 sudo 运行");
+    spdlog::error("请检查 udev 规则或将用户加入相应组");
     return false;
   }
 

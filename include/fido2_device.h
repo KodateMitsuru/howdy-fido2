@@ -30,12 +30,6 @@ class FIDO2Device {
   void stop();
   bool is_running() const { return uhid_.is_running(); }
 
-  // 设置是否使用 PAM 验证（默认启用）
-  void set_use_pam(bool use) { use_pam_ = use; }
-
-  // 设置默认验证结果（当 PAM 未启用时使用）
-  void set_default_auth_result(bool allow) { default_auth_result_ = allow; }
-
   // 设置 PAM 服务名
   void set_pam_service(const std::string& service) { pam_service_ = service; }
 
@@ -105,9 +99,7 @@ class FIDO2Device {
   bool load_credentials_from_tpm();
   bool save_credentials_to_tpm();
 
-  // 验证配置
-  bool use_pam_ = true;
-  bool default_auth_result_ = true;
+  // PAM 服务名
   std::string pam_service_ = "howdy-fido2";
 
   // 用户验证状态缓存

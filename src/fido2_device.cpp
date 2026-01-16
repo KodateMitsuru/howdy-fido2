@@ -460,46 +460,37 @@ bool FIDO2Device::verify_user(const std::string& operation) {
   spdlog::info("========================================");
   spdlog::info("🔐 FIDO2 验证请求: {}", operation);
   spdlog::info("========================================");
+  spdlog::info("🔍 启动 PAM 验证 (服务: {})...", pam_service_);
 
   bool result = false;
 
-  if (!use_pam_) {
-    spdlog::info("PAM 验证已禁用，使用默认结果: {}",
-                 default_auth_result_ ? "允许" : "拒绝");
-    result = default_auth_result_;
-  } else {
-    spdlog::info("🔍 启动 PAM 验证 (服务: {})...", pam_service_);
+  PAMAuthenticator pam(pam_service_);
+  pam.set_timeout(30);
+  pam.set_prompt_callback(
+      [](const std::string& msg) { spdlog::info("   📢 {}", msg); });
 
-    PAMAuthenticator pam(pam_service_);
-    pam.set_timeout(30);
-    pam.set_prompt_callback(
-        [](const std::string& msg) { spdlog::info("   📢 {}", msg); });
+  PAMResult pam_result = pam.authenticate();
 
-    PAMResult pam_result = pam.authenticate();
+  spdlog::info("========================================");
 
-    spdlog::info("========================================");
-
-    switch (pam_result) {
-      case PAMResult::SUCCESS:
-        spdlog::info("✅ PAM 验证成功!");
-        result = true;
-        break;
-      case PAMResult::AUTH_FAILED:
-        spdlog::warn("❌ PAM 验证失败: {}", pam.last_error());
-        result = false;
-        break;
-      case PAMResult::USER_CANCELLED:
-        spdlog::info("⏹️  用户取消或超时");
-        result = false;
-        break;
-      case PAMResult::ERROR:
-      default:
-        spdlog::error("⚠️  PAM 错误: {}", pam.last_error());
-        spdlog::info("   回退到默认结果: {}",
-                     default_auth_result_ ? "允许" : "拒绝");
-        result = default_auth_result_;
-        break;
-    }
+  switch (pam_result) {
+    case PAMResult::SUCCESS:
+      spdlog::info("✅ PAM 验证成功!");
+      result = true;
+      break;
+    case PAMResult::AUTH_FAILED:
+      spdlog::warn("❌ PAM 验证失败: {}", pam.last_error());
+      result = false;
+      break;
+    case PAMResult::USER_CANCELLED:
+      spdlog::info("⏹️  用户取消或超时");
+      result = false;
+      break;
+    case PAMResult::ERROR:
+    default:
+      spdlog::error("⚠️  PAM 错误: {}", pam.last_error());
+      result = false;
+      break;
   }
 
   // 更新验证状态
