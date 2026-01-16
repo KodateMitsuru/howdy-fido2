@@ -80,7 +80,15 @@ target_link_libraries(howdy-fido2-client PRIVATE
     pthread
 )
 
-install(TARGETS howdy-fido2-daemon howdy-fido2-client DESTINATION bin)
+# Passkey 管理工具
+add_executable(howdy-fido2-passkey src/passkey_tool.cpp)
+target_link_libraries(howdy-fido2-passkey PRIVATE 
+    howdy_fido2_core
+    howdy_fido2_dbus
+    pthread
+)
+
+install(TARGETS howdy-fido2-daemon howdy-fido2-client howdy-fido2-passkey DESTINATION bin)
 
 # 打印构建信息
 message(STATUS "Project: ${PROJECT_NAME} v${PROJECT_VERSION}")
