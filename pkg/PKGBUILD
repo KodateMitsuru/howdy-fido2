@@ -1,12 +1,13 @@
 _pkgname=howdy-fido2
 pkgname=$_pkgname-git
-pkgver=0.1.1.r1.gf94db7d
+pkgver=0.1.1.r4.gc43333c
 pkgrel=1
 pkgdesc="Howdy FIDO2 Extension"
 arch=('x86_64')
 url="https://github.com/kodatemitsuru/howdy-fido2"
 license=('GPL-3.0')
 depends=('howdy' 'spdlog' 'libcbor' 'tpm2-tss' 'pam' 'openssl' 'sdbus-cpp')
+makedepends=('cmake')
 source=("$_pkgname::git+https://github.com/kodatemitsuru/howdy-fido2.git")
 sha256sums=('SKIP')
 
