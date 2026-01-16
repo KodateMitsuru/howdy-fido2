@@ -1,0 +1,312 @@
+/**
+ * howdy-fido2-client - 用户客户端
+ *
+ * 负责：
+ * - PAM 用户验证
+ * - 凭据文件管理（~/.local/share/howdy-fido2/）
+ * - 通过 D-Bus 使用守护进程的 TPM 服务
+ *
+ * 以普通用户权限运行
+ */
+
+#include <fmt/format.h>
+#include <spdlog/spdlog.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <filesystem>
+#include <fstream>
+
+#include "dbus_interface.h"
+#include "pam_auth.h"
+
+namespace fs = std::filesystem;
+
+std::atomic<bool> g_running{true};
+
+void signal_handler(int signum) {
+  spdlog::info("收到信号 {}，正在退出...", signum);
+  g_running.store(false);
+}
+
+void print_usage(const char* program) {
+  fmt::print(
+      "用法: {} [选项]\n\n"
+      "选项:\n"
+      "  -s, --service NAME  PAM 服务名 (默认: howdy-fido2)\n"
+      "  -D, --debug         启用调试输出\n"
+      "  -h, --help          显示此帮助信息\n\n"
+      "用户客户端，负责 PAM 验证和凭据管理。\n"
+      "以普通用户权限运行，通过 D-Bus 与守护进程通信。\n",
+      program);
+}
+
+// 用户验证状态缓存
+struct AuthCache {
+  bool verified = false;
+  std::chrono::steady_clock::time_point time;
+  static constexpr int TIMEOUT_SECONDS = 30;
+
+  bool is_valid() const {
+    if (!verified) return false;
+    auto elapsed = std::chrono::steady_clock::now() - time;
+    return elapsed < std::chrono::seconds(TIMEOUT_SECONDS);
+  }
+
+  void set_verified() {
+    verified = true;
+    time = std::chrono::steady_clock::now();
+  }
+
+  void clear() { verified = false; }
+};
+
+// 凭据文件管理
+class CredentialsFile {
+ public:
+  CredentialsFile() {
+    // 获取用户数据目录
+    const char* home = getenv("HOME");
+    if (home) {
+      data_dir_ = fs::path(home) / ".local" / "share" / "howdy-fido2";
+      credentials_file_ = data_dir_ / "credentials.sealed";
+    }
+  }
+
+  bool ensure_directory() {
+    if (data_dir_.empty()) return false;
+    try {
+      if (!fs::exists(data_dir_)) {
+        fs::create_directories(data_dir_);
+        // 设置目录权限为 700
+        chmod(data_dir_.c_str(), 0700);
+      }
+      return true;
+    } catch (const std::exception& e) {
+      spdlog::error("无法创建数据目录: {}", e.what());
+      return false;
+    }
+  }
+
+  std::vector<uint8_t> load() {
+    if (credentials_file_.empty() || !fs::exists(credentials_file_)) {
+      return {};
+    }
+    try {
+      std::ifstream file(credentials_file_, std::ios::binary);
+      if (!file) return {};
+
+      file.seekg(0, std::ios::end);
+      size_t size = file.tellg();
+      file.seekg(0, std::ios::beg);
+
+      std::vector<uint8_t> data(size);
+      file.read(reinterpret_cast<char*>(data.data()), size);
+      return data;
+    } catch (const std::exception& e) {
+      spdlog::error("无法读取凭据文件: {}", e.what());
+      return {};
+    }
+  }
+
+  bool save(const std::vector<uint8_t>& data) {
+    if (credentials_file_.empty()) return false;
+    if (!ensure_directory()) return false;
+
+    try {
+      std::ofstream file(credentials_file_, std::ios::binary | std::ios::trunc);
+      if (!file) {
+        spdlog::error("无法打开凭据文件进行写入");
+        return false;
+      }
+      file.write(reinterpret_cast<const char*>(data.data()), data.size());
+      // 设置文件权限为 600
+      chmod(credentials_file_.c_str(), 0600);
+      return true;
+    } catch (const std::exception& e) {
+      spdlog::error("无法保存凭据文件: {}", e.what());
+      return false;
+    }
+  }
+
+  std::string path() const { return credentials_file_.string(); }
+
+ private:
+  fs::path data_dir_;
+  fs::path credentials_file_;
+};
+
+int main(int argc, char* argv[]) {
+  bool debug = false;
+  std::string pam_service = "howdy-fido2";
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "-h" || arg == "--help") {
+      print_usage(argv[0]);
+      return 0;
+    } else if (arg == "-s" || arg == "--service") {
+      if (i + 1 < argc) {
+        pam_service = argv[++i];
+      } else {
+        spdlog::error("--service 需要参数");
+        return 1;
+      }
+    } else if (arg == "-D" || arg == "--debug") {
+      debug = true;
+    } else {
+      spdlog::error("未知选项: {}", arg);
+      print_usage(argv[0]);
+      return 1;
+    }
+  }
+
+  spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
+  spdlog::set_level(debug ? spdlog::level::debug : spdlog::level::info);
+
+  signal(SIGINT, signal_handler);
+  signal(SIGTERM, signal_handler);
+
+  spdlog::info("==================================");
+  spdlog::info("  Howdy FIDO2 客户端");
+  spdlog::info("==================================");
+  spdlog::info("PAM 服务: {}", pam_service);
+
+  AuthCache auth_cache;
+  CredentialsFile cred_file;
+
+  spdlog::info("凭据文件: {}", cred_file.path());
+
+  // 连接 D-Bus
+  howdy::DBusClient client;
+
+  client.set_pam_callback(
+      [&pam_service, &auth_cache](const std::string& operation,
+                                  const std::string& rp_id) -> bool {
+        spdlog::info("");
+        spdlog::info("========================================");
+        spdlog::info("🔐 FIDO2 验证请求: {}", operation);
+        if (!rp_id.empty()) {
+          spdlog::info("   RP: {}", rp_id);
+        }
+        spdlog::info("========================================");
+
+        // 检查缓存
+        if (auth_cache.is_valid()) {
+          auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::steady_clock::now() - auth_cache.time)
+                             .count();
+          spdlog::info("✅ 使用缓存的验证结果 (剩余 {} 秒)",
+                       AuthCache::TIMEOUT_SECONDS - elapsed);
+          return true;
+        }
+
+        // 执行 PAM 验证
+        spdlog::info("🔍 启动 PAM 验证 (服务: {})...", pam_service);
+
+        howdy::PAMAuthenticator pam(pam_service);
+        pam.set_timeout(30);
+        pam.set_prompt_callback(
+            [](const std::string& msg) { spdlog::info("   📢 {}", msg); });
+
+        auto result = pam.authenticate();
+
+        spdlog::info("========================================");
+
+        switch (result) {
+          case howdy::PAMResult::SUCCESS:
+            spdlog::info("✅ PAM 验证成功!");
+            spdlog::info("📝 验证结果已缓存 ({} 秒有效)",
+                         AuthCache::TIMEOUT_SECONDS);
+            auth_cache.set_verified();
+            return true;
+
+          case howdy::PAMResult::AUTH_FAILED:
+            spdlog::warn("❌ PAM 验证失败: {}", pam.last_error());
+            auth_cache.clear();
+            return false;
+
+          case howdy::PAMResult::USER_CANCELLED:
+            spdlog::info("⏹️  用户取消或超时");
+            auth_cache.clear();
+            return false;
+
+          case howdy::PAMResult::ERROR:
+          default:
+            spdlog::error("⚠️  PAM 错误: {}", pam.last_error());
+            auth_cache.clear();
+            return false;
+        }
+      });
+
+  // 凭据变更回调 - 保存到本地文件
+  client.set_credentials_changed_callback([&client, &cred_file]() {
+    spdlog::info("凭据已变更，保存到本地...");
+    auto data = client.get_credentials();
+    if (!data.empty()) {
+      // 使用 TPM 加密后保存
+      auto sealed = client.seal_data(data);
+      if (!sealed.empty()) {
+        if (cred_file.save(sealed)) {
+          spdlog::info("凭据已保存 ({} 字节)", sealed.size());
+        }
+      } else {
+        // TPM 不可用，直接保存（不推荐）
+        spdlog::warn("TPM 不可用，凭据将以明文保存");
+        cred_file.save(data);
+      }
+    }
+  });
+
+  // 连接重试循环
+  while (g_running.load()) {
+    if (!client.connect()) {
+      spdlog::warn("无法连接到守护进程，5 秒后重试...");
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+      continue;
+    }
+
+    spdlog::info("已连接到守护进程");
+
+    // 加载并上传凭据
+    auto sealed_data = cred_file.load();
+    if (!sealed_data.empty()) {
+      spdlog::info("加载本地凭据 ({} 字节)...", sealed_data.size());
+      // 先解密
+      auto data = client.unseal_data(sealed_data);
+      if (data.empty()) {
+        // TPM 解密失败，可能是直接保存的明文
+        spdlog::warn("TPM 解密失败，尝试直接加载...");
+        data = sealed_data;
+      }
+      if (client.load_credentials(data)) {
+        spdlog::info("凭据已上传到守护进程");
+      } else {
+        spdlog::warn("凭据上传失败");
+      }
+    } else {
+      spdlog::info("没有本地凭据");
+    }
+
+    spdlog::info("等待验证请求...");
+    spdlog::info("-----------------------------------");
+
+    // 运行事件循环
+    while (g_running.load() && client.is_connected()) {
+      client.run();
+    }
+
+    client.disconnect();
+    if (g_running.load()) {
+      spdlog::warn("与守护进程断开连接，尝试重连...");
+    }
+  }
+
+  spdlog::info("-----------------------------------");
+  spdlog::info("客户端已退出");
+
+  return 0;
+}

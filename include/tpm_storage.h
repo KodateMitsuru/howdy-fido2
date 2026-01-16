@@ -1,21 +1,19 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
 namespace howdy {
 
 /**
- * TPM 封装存储
+ * TPM 封装存储服务
  *
  * 使用 TPM2 的 Seal/Unseal 功能保护凭据数据：
  * - 数据使用 TPM 内部密钥加密
  * - 密钥绑定到 TPM，无法导出
- * - 可选绑定 PCR 状态（系统启动状态）
  *
- * 存储位置: ~/.local/share/howdy-fido2/credentials.sealed
+ * 仅提供内存加密/解密服务，文件存储由客户端管理
  */
 class TPMStorage {
  public:
@@ -38,37 +36,23 @@ class TPMStorage {
   bool is_available() const { return available_; }
 
   /**
-   * 封装数据（加密并存储）
+   * 封装数据（加密）
    * @param data 要封装的数据
-   * @return true 如果成功
+   * @return 封装后的数据，如果失败返回空
    */
-  bool seal(const std::vector<uint8_t>& data);
+  std::vector<uint8_t> seal_data(const std::vector<uint8_t>& data);
 
   /**
-   * 解封数据（读取并解密）
-   * @return 解封的数据，如果失败返回 nullopt
+   * 解封数据（解密）
+   * @param sealed_data 封装的数据
+   * @return 解封的数据，如果失败返回空
    */
-  std::optional<std::vector<uint8_t>> unseal();
-
-  /**
-   * 检查是否有已封装的数据
-   */
-  bool has_sealed_data() const;
-
-  /**
-   * 删除已封装的数据
-   */
-  bool remove_sealed_data();
+  std::vector<uint8_t> unseal_data(const std::vector<uint8_t>& sealed_data);
 
   /**
    * 获取最后一次错误信息
    */
   const std::string& last_error() const { return last_error_; }
-
-  /**
-   * 获取存储文件路径
-   */
-  std::string get_storage_path() const;
 
  private:
   // TPM 上下文
@@ -83,12 +67,6 @@ class TPMStorage {
 
   // 清理资源
   void cleanup();
-
-  // 获取数据目录
-  std::string get_data_dir() const;
-
-  // 确保目录存在
-  bool ensure_directory(const std::string& path);
 };
 
 /**

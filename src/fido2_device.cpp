@@ -8,6 +8,8 @@
 #include <thread>
 
 #include "cbor_helper.h"
+#include "pam_auth.h"
+#include "tpm_storage.h"  // for CredentialSerializer
 
 namespace howdy {
 
@@ -47,12 +49,7 @@ FIDO2Device::FIDO2Device() : rng_(std::random_device{}()) {
     spdlog::info("Attestation 证书已生成 ({} 字节)", attestation_cert_.size());
   }
 
-  // 初始化 TPM 存储并加载凭据
-  if (tpm_storage_.initialize()) {
-    load_credentials_from_tpm();
-  } else {
-    spdlog::warn("TPM 存储不可用: {}", tpm_storage_.last_error());
-  }
+  // 凭据由 D-Bus 客户端管理，daemon 不直接加载
 }
 
 FIDO2Device::~FIDO2Device() { stop(); }
@@ -460,37 +457,45 @@ bool FIDO2Device::verify_user(const std::string& operation) {
   spdlog::info("========================================");
   spdlog::info("🔐 FIDO2 验证请求: {}", operation);
   spdlog::info("========================================");
-  spdlog::info("🔍 启动 PAM 验证 (服务: {})...", pam_service_);
 
   bool result = false;
 
-  PAMAuthenticator pam(pam_service_);
-  pam.set_timeout(30);
-  pam.set_prompt_callback(
-      [](const std::string& msg) { spdlog::info("   📢 {}", msg); });
+  // 优先使用外部验证处理器（D-Bus 模式）
+  if (auth_handler_) {
+    spdlog::info("🔗 使用外部验证处理器 (D-Bus)...");
+    result = auth_handler_(operation, current_rp_id_);
+  } else {
+    // 回退到内置 PAM 验证（独立模式）
+    spdlog::info("🔍 启动 PAM 验证 (服务: {})...", pam_service_);
 
-  PAMResult pam_result = pam.authenticate();
+    PAMAuthenticator pam(pam_service_);
+    pam.set_timeout(30);
+    pam.set_prompt_callback(
+        [](const std::string& msg) { spdlog::info("   📢 {}", msg); });
 
-  spdlog::info("========================================");
+    PAMResult pam_result = pam.authenticate();
 
-  switch (pam_result) {
-    case PAMResult::SUCCESS:
-      spdlog::info("✅ PAM 验证成功!");
-      result = true;
-      break;
-    case PAMResult::AUTH_FAILED:
-      spdlog::warn("❌ PAM 验证失败: {}", pam.last_error());
-      result = false;
-      break;
-    case PAMResult::USER_CANCELLED:
-      spdlog::info("⏹️  用户取消或超时");
-      result = false;
-      break;
-    case PAMResult::ERROR:
-    default:
-      spdlog::error("⚠️  PAM 错误: {}", pam.last_error());
-      result = false;
-      break;
+    spdlog::info("========================================");
+
+    switch (pam_result) {
+      case PAMResult::SUCCESS:
+        spdlog::info("✅ PAM 验证成功!");
+        result = true;
+        break;
+      case PAMResult::AUTH_FAILED:
+        spdlog::warn("❌ PAM 验证失败: {}", pam.last_error());
+        result = false;
+        break;
+      case PAMResult::USER_CANCELLED:
+        spdlog::info("⏹️  用户取消或超时");
+        result = false;
+        break;
+      case PAMResult::ERROR:
+      default:
+        spdlog::error("⚠️  PAM 错误: {}", pam.last_error());
+        result = false;
+        break;
+    }
   }
 
   // 更新验证状态
@@ -522,6 +527,9 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
 
   spdlog::debug("CTAP2: RP ID = {}", req.rp_id);
   spdlog::debug("CTAP2: User = {} ({})", req.user_name, req.user_display_name);
+
+  // 设置当前 RP ID（用于 D-Bus 模式）
+  current_rp_id_ = req.rp_id;
 
   // 使用 PAM 验证用户
   if (!verify_user("创建 FIDO2 凭证")) {
@@ -563,8 +571,8 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   cred.counter = 0;
   credentials_[credential_id] = cred;
 
-  // 保存到 TPM
-  save_credentials_to_tpm();
+  // 通知客户端凭据已变更
+  notify_credentials_changed();
 
   spdlog::debug("CTAP2: 凭据已保存，credential_id {} 字节",
                 credential_id.size());
@@ -683,6 +691,9 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
 
   spdlog::debug("CTAP2: RP ID = {}", req.rp_id);
 
+  // 设置当前 RP ID（用于 D-Bus 模式）
+  current_rp_id_ = req.rp_id;
+
   // 使用 PAM 验证用户
   if (!verify_user("FIDO2 身份验证")) {
     spdlog::warn("CTAP2: ❌ 用户验证失败");
@@ -740,8 +751,8 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
   found_cred->counter++;
   uint32_t counter = found_cred->counter;
 
-  // 保存到 TPM (计数器已更新)
-  save_credentials_to_tpm();
+  // 通知客户端凭据已变更（计数器更新）
+  notify_credentials_changed();
 
   // 构建 authData
   std::vector<uint8_t> auth_data;
@@ -1072,8 +1083,8 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_auth_response(
   it->second.counter++;
   uint32_t counter = it->second.counter;
 
-  // 保存到 TPM (计数器已更新)
-  save_credentials_to_tpm();
+  // 通知客户端凭据已变更（计数器更新）
+  notify_credentials_changed();
 
   // 重建用户密钥
   ECKeyPair user_key;
@@ -1126,23 +1137,15 @@ uint32_t FIDO2Device::allocate_channel_id() {
   return cid;
 }
 
-bool FIDO2Device::load_credentials_from_tpm() {
-  if (!tpm_storage_.is_available()) {
-    return false;
-  }
+// ==================== D-Bus 模式凭据操作 ====================
 
-  if (!tpm_storage_.has_sealed_data()) {
-    spdlog::info("TPM: 没有已封装的凭据数据");
+bool FIDO2Device::load_credentials_from_data(const std::vector<uint8_t>& data) {
+  if (data.empty()) {
+    spdlog::debug("凭据数据为空");
     return true;
   }
 
-  auto data = tpm_storage_.unseal();
-  if (!data) {
-    spdlog::error("TPM: 无法解封凭据: {}", tpm_storage_.last_error());
-    return false;
-  }
-
-  auto creds = CredentialSerializer::deserialize(*data);
+  auto creds = CredentialSerializer::deserialize(data);
   credentials_.clear();
 
   for (const auto& cred : creds) {
@@ -1157,16 +1160,11 @@ bool FIDO2Device::load_credentials_from_tpm() {
     credentials_[cred.credential_id] = std::move(stored);
   }
 
-  spdlog::info("TPM: 已加载 {} 个凭据", credentials_.size());
+  spdlog::info("已加载 {} 个凭据", credentials_.size());
   return true;
 }
 
-bool FIDO2Device::save_credentials_to_tpm() {
-  if (!tpm_storage_.is_available()) {
-    spdlog::warn("TPM: 存储不可用，凭据未保存");
-    return false;
-  }
-
+std::vector<uint8_t> FIDO2Device::get_credentials_data() {
   std::vector<CredentialSerializer::Credential> creds;
   creds.reserve(credentials_.size());
 
@@ -1182,15 +1180,13 @@ bool FIDO2Device::save_credentials_to_tpm() {
     creds.push_back(std::move(cred));
   }
 
-  auto data = CredentialSerializer::serialize(creds);
+  return CredentialSerializer::serialize(creds);
+}
 
-  if (!tpm_storage_.seal(data)) {
-    spdlog::error("TPM: 凭据封装失败: {}", tpm_storage_.last_error());
-    return false;
+void FIDO2Device::notify_credentials_changed() {
+  if (credentials_changed_cb_) {
+    credentials_changed_cb_();
   }
-
-  spdlog::info("TPM: 已保存 {} 个凭据到 TPM", credentials_.size());
-  return true;
 }
 
 }  // namespace howdy

@@ -17,8 +17,11 @@ find_package(spdlog REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(TSS2 REQUIRED tss2-esys tss2-mu)
 
-# 源文件
-set(SOURCES
+# sdbus-c++ 库 (D-Bus IPC)
+pkg_check_modules(SDBUS REQUIRED sdbus-c++)
+
+# 核心库源文件（不含 main）
+set(CORE_SOURCES
     src/uhid_device.cpp
     src/fido2_device.cpp
     src/pam_auth.cpp
@@ -27,13 +30,24 @@ set(SOURCES
     src/tpm_storage.cpp
 )
 
-# 头文件目录
-include_directories(include ${PAM_INCLUDE_DIR} ${CBOR_INCLUDE_DIR} ${TSS2_INCLUDE_DIRS})
+# D-Bus 接口源文件
+set(DBUS_SOURCES
+    src/dbus_interface.cpp
+)
 
-# 创建库
-add_library(howdy_fido2_lib STATIC ${SOURCES})
-target_include_directories(howdy_fido2_lib PUBLIC include)
-target_link_libraries(howdy_fido2_lib PUBLIC 
+# 头文件目录
+include_directories(
+    include 
+    ${PAM_INCLUDE_DIR} 
+    ${CBOR_INCLUDE_DIR} 
+    ${TSS2_INCLUDE_DIRS}
+    ${SDBUS_INCLUDE_DIRS}
+)
+
+# 创建核心库
+add_library(howdy_fido2_core STATIC ${CORE_SOURCES})
+target_include_directories(howdy_fido2_core PUBLIC include)
+target_link_libraries(howdy_fido2_core PUBLIC 
     ${PAM_LIBRARY} 
     ${CBOR_LIBRARY} 
     OpenSSL::SSL 
@@ -42,16 +56,35 @@ target_link_libraries(howdy_fido2_lib PUBLIC
     ${TSS2_LIBRARIES}
 )
 
-# 主程序
-add_executable(howdy-fido2 src/main.cpp)
-target_link_libraries(howdy-fido2 PRIVATE howdy_fido2_lib pthread)
+# 创建 D-Bus 库
+add_library(howdy_fido2_dbus STATIC ${DBUS_SOURCES})
+target_include_directories(howdy_fido2_dbus PUBLIC include)
+target_link_libraries(howdy_fido2_dbus PUBLIC 
+    spdlog::spdlog
+    ${SDBUS_LIBRARIES}
+)
 
-# 安装规则
-install(TARGETS howdy-fido2 DESTINATION bin)
-install(FILES pam.d/howdy-fido2 DESTINATION /etc/pam.d OPTIONAL)
+# 守护进程（高权限：UHID + TPM）
+add_executable(howdy-fido2-daemon src/daemon_main.cpp)
+target_link_libraries(howdy-fido2-daemon PRIVATE 
+    howdy_fido2_core 
+    howdy_fido2_dbus 
+    pthread
+)
+
+# 客户端（低权限：PAM 验证）
+add_executable(howdy-fido2-client src/client_main.cpp)
+target_link_libraries(howdy-fido2-client PRIVATE 
+    howdy_fido2_core
+    howdy_fido2_dbus
+    pthread
+)
+
+install(TARGETS howdy-fido2-daemon howdy-fido2-client DESTINATION bin)
 
 # 打印构建信息
 message(STATUS "Project: ${PROJECT_NAME} v${PROJECT_VERSION}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "PAM Library: ${PAM_LIBRARY}")
 message(STATUS "OpenSSL Version: ${OPENSSL_VERSION}")
+message(STATUS "sdbus-c++ Version: ${SDBUS_VERSION}")

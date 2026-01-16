@@ -1,0 +1,36 @@
+[Unit]
+Description=Howdy FIDO2 Virtual Security Key Daemon
+Documentation=https://github.com/example/howdy-fido2
+After=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/howdy-fido2-daemon
+Restart=on-failure
+RestartSec=5
+
+# 安全设置
+User=root
+Group=root
+
+# 保护系统
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=false
+
+# 需要的权限
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+
+# 需要访问的设备
+DevicePolicy=auto
+DeviceAllow=/dev/uhid rw
+DeviceAllow=/dev/tpm0 rw
+DeviceAllow=/dev/tpmrm0 rw
+
+# D-Bus 访问
+BusName=org.howdy.Fido2
+
+[Install]
+WantedBy=multi-user.target

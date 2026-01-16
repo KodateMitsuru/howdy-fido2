@@ -1,15 +1,18 @@
 #pragma once
 
+#include <functional>
 #include <map>
 #include <mutex>
 #include <random>
 
 #include "crypto.h"
-#include "pam_auth.h"
-#include "tpm_storage.h"
 #include "uhid_device.h"
 
 namespace howdy {
+
+// 外部验证回调类型：返回 true 表示验证成功
+using AuthHandler =
+    std::function<bool(const std::string& operation, const std::string& rp_id)>;
 
 // 用于组装分片消息的结构
 struct PendingMessage {
@@ -30,7 +33,12 @@ class FIDO2Device {
   void stop();
   bool is_running() const { return uhid_.is_running(); }
 
-  // 设置 PAM 服务名
+  // 设置外部验证回调（用于 D-Bus 模式）
+  void set_auth_handler(AuthHandler handler) {
+    auth_handler_ = std::move(handler);
+  }
+
+  // 设置 PAM 服务名（用于内置 PAM 模式）
   void set_pam_service(const std::string& service) { pam_service_ = service; }
 
  private:
@@ -94,13 +102,24 @@ class FIDO2Device {
   ECKeyPair attestation_key_;
   std::vector<uint8_t> attestation_cert_;
 
-  // TPM 存储
-  TPMStorage tpm_storage_;
-  bool load_credentials_from_tpm();
-  bool save_credentials_to_tpm();
+ public:
+  // 凭据数据操作（D-Bus 模式使用）
+  using CredentialsChangedCallback = std::function<void()>;
 
-  // PAM 服务名
-  std::string pam_service_ = "howdy-fido2";
+  bool load_credentials_from_data(const std::vector<uint8_t>& data);
+  std::vector<uint8_t> get_credentials_data();
+  void set_credentials_changed_callback(CredentialsChangedCallback cb) {
+    credentials_changed_cb_ = std::move(cb);
+  }
+
+ private:
+  CredentialsChangedCallback credentials_changed_cb_;
+  void notify_credentials_changed();
+
+  // 验证相关
+  AuthHandler auth_handler_;                 // 外部验证回调（D-Bus 模式）
+  std::string pam_service_ = "howdy-fido2";  // PAM 服务名（内置模式）
+  std::string current_rp_id_;                // 当前 RP ID
 
   // 用户验证状态缓存
   bool user_verified_ = false;

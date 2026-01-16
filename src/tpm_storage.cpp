@@ -2,21 +2,13 @@
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <pwd.h>
 #include <spdlog/spdlog.h>
-#include <sys/stat.h>
 #include <tss2/tss2_esys.h>
 #include <tss2/tss2_mu.h>
-#include <unistd.h>
 
 #include <cstring>
-#include <fstream>
 
 namespace howdy {
-
-// 文件名常量
-static const char* SEALED_DATA_FILE = "credentials.sealed";
-static const char* PRIMARY_KEY_FILE = "primary.ctx";
 
 // AES-GCM 参数
 static constexpr size_t AES_KEY_SIZE = 32;  // 256-bit
@@ -38,46 +30,6 @@ void TPMStorage::cleanup() {
     esys_context_ = nullptr;
   }
   available_ = false;
-}
-
-std::string TPMStorage::get_data_dir() const {
-  const char* home = getenv("HOME");
-  if (!home) {
-    struct passwd* pw = getpwuid(getuid());
-    if (pw) {
-      home = pw->pw_dir;
-    }
-  }
-  if (!home) {
-    return "/tmp/howdy-fido2";
-  }
-  return std::string(home) + "/.local/share/howdy-fido2";
-}
-
-std::string TPMStorage::get_storage_path() const {
-  return get_data_dir() + "/" + SEALED_DATA_FILE;
-}
-
-bool TPMStorage::ensure_directory(const std::string& path) {
-  struct stat st;
-  if (stat(path.c_str(), &st) == 0) {
-    return S_ISDIR(st.st_mode);
-  }
-
-  // 递归创建目录
-  size_t pos = 0;
-  while ((pos = path.find('/', pos + 1)) != std::string::npos) {
-    std::string subpath = path.substr(0, pos);
-    if (stat(subpath.c_str(), &st) != 0) {
-      if (mkdir(subpath.c_str(), 0700) != 0 && errno != EEXIST) {
-        return false;
-      }
-    }
-  }
-  if (mkdir(path.c_str(), 0700) != 0 && errno != EEXIST) {
-    return false;
-  }
-  return true;
 }
 
 bool TPMStorage::initialize() {
@@ -102,16 +54,8 @@ bool TPMStorage::initialize() {
     return false;
   }
 
-  // 确保存储目录存在
-  if (!ensure_directory(get_data_dir())) {
-    last_error_ = "无法创建存储目录";
-    spdlog::error("TPM: {}", last_error_);
-    cleanup();
-    return false;
-  }
-
   available_ = true;
-  spdlog::info("TPM: TPM2 封装存储已初始化");
+  spdlog::info("TPM: TPM2 封装服务已初始化");
   return true;
 }
 
@@ -271,262 +215,6 @@ static std::optional<std::vector<uint8_t>> unseal_small(
   return result;
 }
 
-bool TPMStorage::seal(const std::vector<uint8_t>& data) {
-  if (!available_) {
-    last_error_ = "TPM 未初始化";
-    return false;
-  }
-
-  if (data.empty()) {
-    last_error_ = "数据为空";
-    return false;
-  }
-
-  spdlog::debug("TPM seal: 数据大小={} 字节 (使用混合加密)", data.size());
-
-  // 1. 生成随机 AES 密钥
-  std::vector<uint8_t> aes_key(AES_KEY_SIZE);
-  if (RAND_bytes(aes_key.data(), AES_KEY_SIZE) != 1) {
-    last_error_ = "生成随机密钥失败";
-    return false;
-  }
-
-  // 2. 用 TPM 封装 AES 密钥
-  TPM2B_PUBLIC sealed_pub;
-  TPM2B_PRIVATE sealed_priv;
-  auto* ctx = static_cast<ESYS_CONTEXT*>(esys_context_);
-  ESYS_TR primary = primary_handle_;
-
-  if (!seal_small(ctx, primary, aes_key, sealed_pub, sealed_priv)) {
-    last_error_ = "TPM 封装 AES 密钥失败";
-    return false;
-  }
-
-  spdlog::debug("TPM seal: AES 密钥已封装到 TPM");
-
-  // 3. 用 AES-GCM 加密数据
-  std::vector<uint8_t> iv(AES_GCM_IV_SIZE);
-  if (RAND_bytes(iv.data(), AES_GCM_IV_SIZE) != 1) {
-    last_error_ = "生成 IV 失败";
-    return false;
-  }
-
-  std::vector<uint8_t> ciphertext(data.size() + AES_GCM_TAG_SIZE);
-  std::vector<uint8_t> tag(AES_GCM_TAG_SIZE);
-
-  EVP_CIPHER_CTX* evp_ctx = EVP_CIPHER_CTX_new();
-  if (!evp_ctx) {
-    last_error_ = "创建加密上下文失败";
-    return false;
-  }
-
-  int len = 0;
-  int ciphertext_len = 0;
-
-  bool encrypt_ok =
-      EVP_EncryptInit_ex(evp_ctx, EVP_aes_256_gcm(), nullptr, nullptr,
-                         nullptr) == 1 &&
-      EVP_EncryptInit_ex(evp_ctx, nullptr, nullptr, aes_key.data(),
-                         iv.data()) == 1 &&
-      EVP_EncryptUpdate(evp_ctx, ciphertext.data(), &len, data.data(),
-                        static_cast<int>(data.size())) == 1;
-  ciphertext_len = len;
-
-  if (encrypt_ok) {
-    encrypt_ok =
-        EVP_EncryptFinal_ex(evp_ctx, ciphertext.data() + len, &len) == 1;
-    ciphertext_len += len;
-  }
-
-  if (encrypt_ok) {
-    encrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx, EVP_CTRL_GCM_GET_TAG,
-                                     AES_GCM_TAG_SIZE, tag.data()) == 1;
-  }
-
-  EVP_CIPHER_CTX_free(evp_ctx);
-
-  if (!encrypt_ok) {
-    last_error_ = "AES-GCM 加密失败";
-    return false;
-  }
-
-  ciphertext.resize(ciphertext_len);
-
-  // 4. 保存到文件: [sealed_pub][sealed_priv][iv][tag][ciphertext]
-  std::string filepath = get_storage_path();
-  std::ofstream file(filepath, std::ios::binary);
-  if (!file) {
-    last_error_ = "无法打开文件写入";
-    return false;
-  }
-
-  // 序列化 TPM 对象
-  uint8_t pub_buf[sizeof(TPM2B_PUBLIC)];
-  size_t pub_size = 0;
-  Tss2_MU_TPM2B_PUBLIC_Marshal(&sealed_pub, pub_buf, sizeof(pub_buf),
-                               &pub_size);
-
-  uint8_t priv_buf[sizeof(TPM2B_PRIVATE)];
-  size_t priv_size = 0;
-  Tss2_MU_TPM2B_PRIVATE_Marshal(&sealed_priv, priv_buf, sizeof(priv_buf),
-                                &priv_size);
-
-  // 写入格式: pub_len(4) + pub + priv_len(4) + priv + iv + tag + cipher_len(4)
-  // + cipher
-  uint32_t pub_len = static_cast<uint32_t>(pub_size);
-  uint32_t priv_len = static_cast<uint32_t>(priv_size);
-  uint32_t cipher_len = static_cast<uint32_t>(ciphertext.size());
-
-  file.write(reinterpret_cast<char*>(&pub_len), 4);
-  file.write(reinterpret_cast<char*>(pub_buf), pub_size);
-  file.write(reinterpret_cast<char*>(&priv_len), 4);
-  file.write(reinterpret_cast<char*>(priv_buf), priv_size);
-  file.write(reinterpret_cast<char*>(iv.data()), AES_GCM_IV_SIZE);
-  file.write(reinterpret_cast<char*>(tag.data()), AES_GCM_TAG_SIZE);
-  file.write(reinterpret_cast<char*>(&cipher_len), 4);
-  file.write(reinterpret_cast<char*>(ciphertext.data()), ciphertext.size());
-
-  file.close();
-
-  // 清除敏感数据
-  OPENSSL_cleanse(aes_key.data(), aes_key.size());
-
-  spdlog::info("TPM: 数据已加密保存到 {} ({} 字节)", filepath,
-               ciphertext.size());
-  return true;
-}
-
-std::optional<std::vector<uint8_t>> TPMStorage::unseal() {
-  if (!available_) {
-    last_error_ = "TPM 未初始化";
-    return std::nullopt;
-  }
-
-  std::string filepath = get_storage_path();
-  std::ifstream file(filepath, std::ios::binary);
-  if (!file) {
-    last_error_ = "无法打开封装文件";
-    return std::nullopt;
-  }
-
-  // 1. 读取 sealed public
-  uint32_t pub_len;
-  file.read(reinterpret_cast<char*>(&pub_len), 4);
-  if (pub_len > sizeof(TPM2B_PUBLIC)) {
-    last_error_ = "文件格式错误";
-    return std::nullopt;
-  }
-
-  std::vector<uint8_t> pub_buf(pub_len);
-  file.read(reinterpret_cast<char*>(pub_buf.data()), pub_len);
-
-  TPM2B_PUBLIC sealed_pub = {0};
-  size_t offset = 0;
-  Tss2_MU_TPM2B_PUBLIC_Unmarshal(pub_buf.data(), pub_len, &offset, &sealed_pub);
-
-  // 2. 读取 sealed private
-  uint32_t priv_len;
-  file.read(reinterpret_cast<char*>(&priv_len), 4);
-  if (priv_len > sizeof(TPM2B_PRIVATE)) {
-    last_error_ = "文件格式错误";
-    return std::nullopt;
-  }
-
-  std::vector<uint8_t> priv_buf(priv_len);
-  file.read(reinterpret_cast<char*>(priv_buf.data()), priv_len);
-
-  TPM2B_PRIVATE sealed_priv = {0};
-  offset = 0;
-  Tss2_MU_TPM2B_PRIVATE_Unmarshal(priv_buf.data(), priv_len, &offset,
-                                  &sealed_priv);
-
-  // 3. 读取 IV 和 Tag
-  std::vector<uint8_t> iv(AES_GCM_IV_SIZE);
-  std::vector<uint8_t> tag(AES_GCM_TAG_SIZE);
-  file.read(reinterpret_cast<char*>(iv.data()), AES_GCM_IV_SIZE);
-  file.read(reinterpret_cast<char*>(tag.data()), AES_GCM_TAG_SIZE);
-
-  // 4. 读取密文
-  uint32_t cipher_len;
-  file.read(reinterpret_cast<char*>(&cipher_len), 4);
-  std::vector<uint8_t> ciphertext(cipher_len);
-  file.read(reinterpret_cast<char*>(ciphertext.data()), cipher_len);
-
-  file.close();
-
-  // 5. 从 TPM 解封 AES 密钥
-  auto* ctx = static_cast<ESYS_CONTEXT*>(esys_context_);
-  ESYS_TR primary = primary_handle_;
-  auto aes_key_opt = unseal_small(ctx, primary, sealed_pub, sealed_priv);
-  if (!aes_key_opt) {
-    last_error_ = "TPM 解封 AES 密钥失败";
-    return std::nullopt;
-  }
-
-  auto& aes_key = *aes_key_opt;
-  spdlog::debug("TPM unseal: AES 密钥已从 TPM 解封");
-
-  // 6. 用 AES-GCM 解密数据
-  std::vector<uint8_t> plaintext(ciphertext.size());
-
-  EVP_CIPHER_CTX* evp_ctx = EVP_CIPHER_CTX_new();
-  if (!evp_ctx) {
-    last_error_ = "创建解密上下文失败";
-    return std::nullopt;
-  }
-
-  int len = 0;
-  int plaintext_len = 0;
-
-  bool decrypt_ok =
-      EVP_DecryptInit_ex(evp_ctx, EVP_aes_256_gcm(), nullptr, nullptr,
-                         nullptr) == 1 &&
-      EVP_DecryptInit_ex(evp_ctx, nullptr, nullptr, aes_key.data(),
-                         iv.data()) == 1 &&
-      EVP_DecryptUpdate(evp_ctx, plaintext.data(), &len, ciphertext.data(),
-                        static_cast<int>(ciphertext.size())) == 1;
-  plaintext_len = len;
-
-  if (decrypt_ok) {
-    decrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx, EVP_CTRL_GCM_SET_TAG,
-                                     AES_GCM_TAG_SIZE, tag.data()) == 1;
-  }
-
-  if (decrypt_ok) {
-    decrypt_ok =
-        EVP_DecryptFinal_ex(evp_ctx, plaintext.data() + len, &len) == 1;
-    plaintext_len += len;
-  }
-
-  EVP_CIPHER_CTX_free(evp_ctx);
-
-  // 清除敏感数据
-  OPENSSL_cleanse(aes_key.data(), aes_key.size());
-
-  if (!decrypt_ok) {
-    last_error_ = "AES-GCM 解密失败 (数据可能被篡改)";
-    return std::nullopt;
-  }
-
-  plaintext.resize(plaintext_len);
-  spdlog::debug("TPM unseal: 数据解密成功 ({} 字节)", plaintext.size());
-  return plaintext;
-}
-
-bool TPMStorage::has_sealed_data() const {
-  struct stat st;
-  return stat(get_storage_path().c_str(), &st) == 0;
-}
-
-bool TPMStorage::remove_sealed_data() {
-  std::string filepath = get_storage_path();
-  if (unlink(filepath.c_str()) != 0 && errno != ENOENT) {
-    last_error_ = "删除封装文件失败";
-    return false;
-  }
-  return true;
-}
-
 // ============== CredentialSerializer 实现 ==============
 
 std::vector<uint8_t> CredentialSerializer::serialize(
@@ -660,6 +348,276 @@ std::vector<CredentialSerializer::Credential> CredentialSerializer::deserialize(
   }
 
   return result;
+}
+
+std::vector<uint8_t> TPMStorage::seal_data(const std::vector<uint8_t>& data) {
+  if (!available_) {
+    last_error_ = "TPM 未初始化";
+    return {};
+  }
+
+  if (data.empty()) {
+    return {};
+  }
+
+  spdlog::debug("TPM seal_data: 数据大小={} 字节", data.size());
+
+  // 1. 生成随机 AES 密钥
+  std::vector<uint8_t> aes_key(AES_KEY_SIZE);
+  if (RAND_bytes(aes_key.data(), AES_KEY_SIZE) != 1) {
+    last_error_ = "生成随机密钥失败";
+    return {};
+  }
+
+  // 2. 用 TPM 封装 AES 密钥
+  TPM2B_PUBLIC sealed_pub;
+  TPM2B_PRIVATE sealed_priv;
+  auto* ctx = static_cast<ESYS_CONTEXT*>(esys_context_);
+  ESYS_TR primary = primary_handle_;
+
+  if (!seal_small(ctx, primary, aes_key, sealed_pub, sealed_priv)) {
+    last_error_ = "TPM 封装 AES 密钥失败";
+    return {};
+  }
+
+  // 3. 用 AES-GCM 加密数据
+  std::vector<uint8_t> iv(AES_GCM_IV_SIZE);
+  if (RAND_bytes(iv.data(), AES_GCM_IV_SIZE) != 1) {
+    last_error_ = "生成 IV 失败";
+    return {};
+  }
+
+  std::vector<uint8_t> ciphertext(data.size() + AES_GCM_TAG_SIZE);
+  std::vector<uint8_t> tag(AES_GCM_TAG_SIZE);
+
+  EVP_CIPHER_CTX* evp_ctx = EVP_CIPHER_CTX_new();
+  if (!evp_ctx) {
+    last_error_ = "创建加密上下文失败";
+    return {};
+  }
+
+  int len = 0;
+  int ciphertext_len = 0;
+
+  bool encrypt_ok =
+      EVP_EncryptInit_ex(evp_ctx, EVP_aes_256_gcm(), nullptr, nullptr,
+                         nullptr) == 1 &&
+      EVP_EncryptInit_ex(evp_ctx, nullptr, nullptr, aes_key.data(),
+                         iv.data()) == 1 &&
+      EVP_EncryptUpdate(evp_ctx, ciphertext.data(), &len, data.data(),
+                        static_cast<int>(data.size())) == 1;
+  ciphertext_len = len;
+
+  if (encrypt_ok) {
+    encrypt_ok =
+        EVP_EncryptFinal_ex(evp_ctx, ciphertext.data() + len, &len) == 1;
+    ciphertext_len += len;
+  }
+
+  if (encrypt_ok) {
+    encrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx, EVP_CTRL_GCM_GET_TAG,
+                                     AES_GCM_TAG_SIZE, tag.data()) == 1;
+  }
+
+  EVP_CIPHER_CTX_free(evp_ctx);
+
+  if (!encrypt_ok) {
+    last_error_ = "AES-GCM 加密失败";
+    return {};
+  }
+
+  ciphertext.resize(ciphertext_len);
+
+  // 4. 组装输出:
+  // [pub_len(4)][pub][priv_len(4)][priv][iv][tag][cipher_len(4)][cipher]
+  std::vector<uint8_t> result;
+
+  // 序列化 TPM 对象
+  uint8_t pub_buf[sizeof(TPM2B_PUBLIC)];
+  size_t pub_size = 0;
+  Tss2_MU_TPM2B_PUBLIC_Marshal(&sealed_pub, pub_buf, sizeof(pub_buf),
+                               &pub_size);
+
+  uint8_t priv_buf[sizeof(TPM2B_PRIVATE)];
+  size_t priv_size = 0;
+  Tss2_MU_TPM2B_PRIVATE_Marshal(&sealed_priv, priv_buf, sizeof(priv_buf),
+                                &priv_size);
+
+  uint32_t pub_len = static_cast<uint32_t>(pub_size);
+  uint32_t priv_len = static_cast<uint32_t>(priv_size);
+  uint32_t cipher_len = static_cast<uint32_t>(ciphertext.size());
+
+  // 写入到 result
+  result.resize(4 + pub_size + 4 + priv_size + AES_GCM_IV_SIZE +
+                AES_GCM_TAG_SIZE + 4 + ciphertext.size());
+  size_t offset = 0;
+
+  memcpy(result.data() + offset, &pub_len, 4);
+  offset += 4;
+  memcpy(result.data() + offset, pub_buf, pub_size);
+  offset += pub_size;
+  memcpy(result.data() + offset, &priv_len, 4);
+  offset += 4;
+  memcpy(result.data() + offset, priv_buf, priv_size);
+  offset += priv_size;
+  memcpy(result.data() + offset, iv.data(), AES_GCM_IV_SIZE);
+  offset += AES_GCM_IV_SIZE;
+  memcpy(result.data() + offset, tag.data(), AES_GCM_TAG_SIZE);
+  offset += AES_GCM_TAG_SIZE;
+  memcpy(result.data() + offset, &cipher_len, 4);
+  offset += 4;
+  memcpy(result.data() + offset, ciphertext.data(), ciphertext.size());
+
+  // 清除敏感数据
+  OPENSSL_cleanse(aes_key.data(), aes_key.size());
+
+  spdlog::debug("TPM seal_data: 输出大小={} 字节", result.size());
+  return result;
+}
+
+std::vector<uint8_t> TPMStorage::unseal_data(
+    const std::vector<uint8_t>& sealed_data) {
+  if (!available_) {
+    last_error_ = "TPM 未初始化";
+    return {};
+  }
+
+  if (sealed_data.empty()) {
+    return {};
+  }
+
+  spdlog::debug("TPM unseal_data: 输入大小={} 字节", sealed_data.size());
+
+  size_t offset = 0;
+
+  // 读取 pub_len 和 pub
+  if (offset + 4 > sealed_data.size()) {
+    last_error_ = "数据太短";
+    return {};
+  }
+  uint32_t pub_len;
+  memcpy(&pub_len, sealed_data.data() + offset, 4);
+  offset += 4;
+
+  if (offset + pub_len > sealed_data.size()) {
+    last_error_ = "pub 数据不完整";
+    return {};
+  }
+  TPM2B_PUBLIC sealed_pub;
+  size_t mu_offset = 0;
+  Tss2_MU_TPM2B_PUBLIC_Unmarshal(sealed_data.data() + offset, pub_len,
+                                 &mu_offset, &sealed_pub);
+  offset += pub_len;
+
+  // 读取 priv_len 和 priv
+  if (offset + 4 > sealed_data.size()) {
+    last_error_ = "数据太短";
+    return {};
+  }
+  uint32_t priv_len;
+  memcpy(&priv_len, sealed_data.data() + offset, 4);
+  offset += 4;
+
+  if (offset + priv_len > sealed_data.size()) {
+    last_error_ = "priv 数据不完整";
+    return {};
+  }
+  TPM2B_PRIVATE sealed_priv;
+  mu_offset = 0;
+  Tss2_MU_TPM2B_PRIVATE_Unmarshal(sealed_data.data() + offset, priv_len,
+                                  &mu_offset, &sealed_priv);
+  offset += priv_len;
+
+  // 读取 IV
+  if (offset + AES_GCM_IV_SIZE > sealed_data.size()) {
+    last_error_ = "IV 数据不完整";
+    return {};
+  }
+  std::vector<uint8_t> iv(sealed_data.begin() + offset,
+                          sealed_data.begin() + offset + AES_GCM_IV_SIZE);
+  offset += AES_GCM_IV_SIZE;
+
+  // 读取 tag
+  if (offset + AES_GCM_TAG_SIZE > sealed_data.size()) {
+    last_error_ = "tag 数据不完整";
+    return {};
+  }
+  std::vector<uint8_t> tag(sealed_data.begin() + offset,
+                           sealed_data.begin() + offset + AES_GCM_TAG_SIZE);
+  offset += AES_GCM_TAG_SIZE;
+
+  // 读取 cipher_len 和 ciphertext
+  if (offset + 4 > sealed_data.size()) {
+    last_error_ = "数据太短";
+    return {};
+  }
+  uint32_t cipher_len;
+  memcpy(&cipher_len, sealed_data.data() + offset, 4);
+  offset += 4;
+
+  if (offset + cipher_len > sealed_data.size()) {
+    last_error_ = "ciphertext 数据不完整";
+    return {};
+  }
+  std::vector<uint8_t> ciphertext(sealed_data.begin() + offset,
+                                  sealed_data.begin() + offset + cipher_len);
+
+  // 用 TPM 解封 AES 密钥
+  auto* ctx = static_cast<ESYS_CONTEXT*>(esys_context_);
+  ESYS_TR primary = primary_handle_;
+
+  auto aes_key_opt = unseal_small(ctx, primary, sealed_pub, sealed_priv);
+  if (!aes_key_opt) {
+    last_error_ = "TPM 解封 AES 密钥失败";
+    return {};
+  }
+  auto& aes_key = *aes_key_opt;
+
+  // 用 AES-GCM 解密数据
+  std::vector<uint8_t> plaintext(ciphertext.size());
+
+  EVP_CIPHER_CTX* evp_ctx = EVP_CIPHER_CTX_new();
+  if (!evp_ctx) {
+    OPENSSL_cleanse(aes_key.data(), aes_key.size());
+    last_error_ = "创建解密上下文失败";
+    return {};
+  }
+
+  int len = 0;
+  int plaintext_len = 0;
+
+  bool decrypt_ok =
+      EVP_DecryptInit_ex(evp_ctx, EVP_aes_256_gcm(), nullptr, nullptr,
+                         nullptr) == 1 &&
+      EVP_DecryptInit_ex(evp_ctx, nullptr, nullptr, aes_key.data(),
+                         iv.data()) == 1 &&
+      EVP_DecryptUpdate(evp_ctx, plaintext.data(), &len, ciphertext.data(),
+                        static_cast<int>(ciphertext.size())) == 1;
+  plaintext_len = len;
+
+  if (decrypt_ok) {
+    decrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx, EVP_CTRL_GCM_SET_TAG,
+                                     AES_GCM_TAG_SIZE, tag.data()) == 1;
+  }
+
+  if (decrypt_ok) {
+    decrypt_ok =
+        EVP_DecryptFinal_ex(evp_ctx, plaintext.data() + len, &len) == 1;
+    plaintext_len += len;
+  }
+
+  EVP_CIPHER_CTX_free(evp_ctx);
+  OPENSSL_cleanse(aes_key.data(), aes_key.size());
+
+  if (!decrypt_ok) {
+    last_error_ = "AES-GCM 解密失败（数据可能被篡改）";
+    return {};
+  }
+
+  plaintext.resize(plaintext_len);
+
+  spdlog::debug("TPM unseal_data: 输出大小={} 字节", plaintext.size());
+  return plaintext;
 }
 
 }  // namespace howdy

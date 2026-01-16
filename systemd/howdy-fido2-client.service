@@ -1,0 +1,19 @@
+[Unit]
+Description=Howdy FIDO2 PAM Authentication Client
+Documentation=https://github.com/example/howdy-fido2
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/howdy-fido2-client
+Restart=on-failure
+RestartSec=5
+
+# 保护系统
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/howdy-fido2
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
