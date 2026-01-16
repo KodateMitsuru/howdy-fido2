@@ -34,75 +34,26 @@ std::vector<uint8_t> CborEncoder::encode(cbor_item_t* item) {
   return buffer;
 }
 
-// 辅助函数：比较两个 CBOR 键的规范顺序
-// 规则：先按长度排序，同长度按字节值排序
-static bool cbor_key_less(const std::vector<uint8_t>& a,
-                          const std::vector<uint8_t>& b) {
-  if (a.size() != b.size()) return a.size() < b.size();
-  return a < b;
-}
+// 辅助函数：构建按规范顺序排序的 string-keyed map
+static cbor_item_t* build_sorted_string_map(
+    std::vector<std::pair<std::string, cbor_item_t*>>& items) {
+  // 按规范顺序排序
+  std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+    if (a.first.size() != b.first.size())
+      return a.first.size() < b.first.size();
+    return a.first < b.first;
+  });
 
-// 辅助函数：编码单个键值对到缓冲区
-static void encode_pair_to_buffer(std::vector<uint8_t>& buffer,
-                                  cbor_item_t* key, cbor_item_t* value) {
-  size_t key_size = cbor_serialized_size(key);
-  size_t value_size = cbor_serialized_size(value);
-  size_t old_size = buffer.size();
-  buffer.resize(old_size + key_size + value_size);
-  cbor_serialize(key, buffer.data() + old_size, key_size);
-  cbor_serialize(value, buffer.data() + old_size + key_size, value_size);
-}
-
-// 辅助函数：按规范顺序编码 string-keyed map
-static std::vector<uint8_t> encode_string_map_canonical(
-    const std::map<std::string, cbor_item_t*>& items) {
-  // 收集所有键值对的编码
-  std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>
-      encoded_pairs;
-
-  for (const auto& [k, v] : items) {
-    cbor_item_t* key = cbor_build_string(k.c_str());
-    size_t key_size = cbor_serialized_size(key);
-    std::vector<uint8_t> key_bytes(key_size);
-    cbor_serialize(key, key_bytes.data(), key_size);
-    cbor_decref(&key);
-
-    size_t value_size = cbor_serialized_size(v);
-    std::vector<uint8_t> value_bytes(value_size);
-    cbor_serialize(v, value_bytes.data(), value_size);
-
-    encoded_pairs.emplace_back(std::move(key_bytes), std::move(value_bytes));
+  cbor_item_t* map = cbor_new_definite_map(items.size());
+  for (auto& [key, value] : items) {
+    bool ok =
+        cbor_map_add(map, {.key = cbor_move(cbor_build_string(key.c_str())),
+                           .value = cbor_move(value)});
+    if (!ok) {
+      spdlog::warn("CBOR: cbor_map_add 失败");
+    }
   }
-
-  // 按照键的规范顺序排序
-  std::sort(encoded_pairs.begin(), encoded_pairs.end(),
-            [](const auto& a, const auto& b) {
-              return cbor_key_less(a.first, b.first);
-            });
-
-  // 构建结果
-  std::vector<uint8_t> result;
-
-  // Map header
-  size_t count = encoded_pairs.size();
-  if (count <= 23) {
-    result.push_back(0xA0 | count);
-  } else if (count <= 255) {
-    result.push_back(0xB8);
-    result.push_back(count);
-  } else {
-    result.push_back(0xB9);
-    result.push_back((count >> 8) & 0xFF);
-    result.push_back(count & 0xFF);
-  }
-
-  // 键值对
-  for (const auto& [key_bytes, value_bytes] : encoded_pairs) {
-    result.insert(result.end(), key_bytes.begin(), key_bytes.end());
-    result.insert(result.end(), value_bytes.begin(), value_bytes.end());
-  }
-
-  return result;
+  return map;
 }
 
 std::vector<uint8_t> CborEncoder::encode_get_info(
@@ -112,120 +63,96 @@ std::vector<uint8_t> CborEncoder::encode_get_info(
     const std::map<std::string, bool>& options, uint32_t max_msg_size,
     const std::vector<int>& pin_protocols, int max_cred_count,
     int max_cred_id_length) {
-  // 手动构建规范 CBOR
-  // CTAP2 GetInfo 响应使用整数键，必须按数值排序: 1, 2, 3, 4, 5, 6, 7, 8, 10
-  std::vector<uint8_t> result;
-
-  // 计算 map 大小
-  int map_size = 4;  // versions, aaguid, maxMsgSize, algorithms 是必需的
-  if (!extensions.empty()) map_size++;
-  if (!options.empty()) map_size++;
-  if (!pin_protocols.empty()) map_size++;
-  if (max_cred_count > 0) map_size++;
-  if (max_cred_id_length > 0) map_size++;
-
-  // Map header
-  if (map_size <= 23) {
-    result.push_back(0xA0 | map_size);
-  } else {
-    result.push_back(0xB8);
-    result.push_back(map_size);
-  }
+  // CTAP2 GetInfo 响应使用整数键，按数值排序: 1, 2, 3, 4, 5, 6, 7, 8, 10
+  // 使用有序的键值对列表，然后按顺序构建 map
+  std::vector<std::pair<int, cbor_item_t*>> items;
 
   // 1: versions (array of strings)
-  result.push_back(0x01);  // key = 1
-  cbor_item_t* versions_array = cbor_new_definite_array(versions.size());
-  for (const auto& v : versions) {
-    cbor_array_push(versions_array, cbor_move(cbor_build_string(v.c_str())));
+  {
+    cbor_item_t* arr = cbor_new_definite_array(versions.size());
+    for (const auto& v : versions) {
+      if (!cbor_array_push(arr, cbor_move(cbor_build_string(v.c_str())))) {
+        spdlog::warn("CBOR: cbor_array_push 失败");
+      }
+    }
+    items.emplace_back(1, arr);
   }
-  auto versions_bytes = encode(versions_array);
-  cbor_decref(&versions_array);
-  result.insert(result.end(), versions_bytes.begin(), versions_bytes.end());
 
   // 2: extensions (if not empty)
   if (!extensions.empty()) {
-    result.push_back(0x02);  // key = 2
-    cbor_item_t* ext_array = cbor_new_definite_array(extensions.size());
+    cbor_item_t* arr = cbor_new_definite_array(extensions.size());
     for (const auto& e : extensions) {
-      cbor_array_push(ext_array, cbor_move(cbor_build_string(e.c_str())));
+      if (!cbor_array_push(arr, cbor_move(cbor_build_string(e.c_str())))) {
+        spdlog::warn("CBOR: cbor_array_push 失败");
+      }
     }
-    auto ext_bytes = encode(ext_array);
-    cbor_decref(&ext_array);
-    result.insert(result.end(), ext_bytes.begin(), ext_bytes.end());
+    items.emplace_back(2, arr);
   }
 
   // 3: aaguid (16 bytes)
-  result.push_back(0x03);  // key = 3
-  result.push_back(0x50);  // bytes(16)
-  result.insert(result.end(), aaguid.begin(), aaguid.end());
+  items.emplace_back(3, cbor_build_bytestring(aaguid.data(), aaguid.size()));
 
-  // 4: options (map of string -> bool) - 必须按键的规范顺序
+  // 4: options (map of string -> bool) - 按键的规范顺序
   if (!options.empty()) {
-    result.push_back(0x04);  // key = 4
-
-    // 构建临时 map 用于排序
-    std::map<std::string, cbor_item_t*> opts_items;
+    std::vector<std::pair<std::string, cbor_item_t*>> opt_items;
     for (const auto& [k, v] : options) {
-      opts_items[k] = cbor_build_bool(v);
+      opt_items.emplace_back(k, cbor_build_bool(v));
     }
-    auto opts_bytes = encode_string_map_canonical(opts_items);
-    for (auto& [k, v] : opts_items) {
-      cbor_decref(&v);
-    }
-    result.insert(result.end(), opts_bytes.begin(), opts_bytes.end());
+    items.emplace_back(4, build_sorted_string_map(opt_items));
   }
 
   // 5: maxMsgSize
-  result.push_back(0x05);  // key = 5
-  result.push_back(0x19);  // uint16
-  result.push_back((max_msg_size >> 8) & 0xFF);
-  result.push_back(max_msg_size & 0xFF);
+  items.emplace_back(5, cbor_build_uint32(max_msg_size));
 
   // 6: pinUvAuthProtocols (if not empty)
   if (!pin_protocols.empty()) {
-    result.push_back(0x06);                         // key = 6
-    result.push_back(0x80 | pin_protocols.size());  // array(n)
+    cbor_item_t* arr = cbor_new_definite_array(pin_protocols.size());
     for (int p : pin_protocols) {
-      result.push_back(p);  // small positive int
+      if (!cbor_array_push(arr, cbor_move(cbor_build_uint8(p)))) {
+        spdlog::warn("CBOR: cbor_array_push 失败");
+      }
     }
+    items.emplace_back(6, arr);
   }
 
   // 7: maxCredentialCountInList
   if (max_cred_count > 0) {
-    result.push_back(0x07);  // key = 7
-    result.push_back(max_cred_count);
+    items.emplace_back(7, cbor_build_uint8(max_cred_count));
   }
 
   // 8: maxCredentialIdLength
   if (max_cred_id_length > 0) {
-    result.push_back(0x08);  // key = 8
-    if (max_cred_id_length <= 23) {
-      result.push_back(max_cred_id_length);
-    } else if (max_cred_id_length <= 255) {
-      result.push_back(0x18);
-      result.push_back(max_cred_id_length);
+    items.emplace_back(8, cbor_build_uint16(max_cred_id_length));
+  }
+
+  // 10: algorithms - 按键规范顺序 ("alg" < "type")
+  {
+    std::vector<std::pair<std::string, cbor_item_t*>> alg_items;
+    alg_items.emplace_back("alg", cbor_build_negint8(6));  // -7 = -(6+1)
+    alg_items.emplace_back("type", cbor_build_string("public-key"));
+    cbor_item_t* alg_map = build_sorted_string_map(alg_items);
+    cbor_item_t* alg_arr = cbor_new_definite_array(1);
+    if (!cbor_array_push(alg_arr, cbor_move(alg_map))) {
+      spdlog::warn("CBOR: cbor_array_push 失败");
+    }
+    items.emplace_back(10, alg_arr);
+  }
+
+  // 按键排序（整数键按值升序）
+  std::sort(items.begin(), items.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  // 构建最终 map
+  cbor_item_t* root = cbor_new_definite_map(items.size());
+  for (auto& [key, value] : items) {
+    if (!cbor_map_add(root, {.key = cbor_move(cbor_build_uint8(key)),
+                             .value = cbor_move(value)})) {
+      spdlog::warn("CBOR: cbor_map_add 失败");
     }
   }
 
-  // 0x0A (10): algorithms - 必须按键的规范顺序 ("alg" < "type" 因为长度 3 < 4)
-  result.push_back(0x0A);  // key = 10
-  result.push_back(0x81);  // array(1)
-  result.push_back(0xA2);  // map(2)
-  // "alg": -7 (3 bytes key)
-  result.push_back(0x63);  // text(3)
-  result.push_back('a');
-  result.push_back('l');
-  result.push_back('g');
-  result.push_back(0x26);  // -7
-  // "type": "public-key" (4 bytes key)
-  result.push_back(0x64);  // text(4)
-  result.push_back('t');
-  result.push_back('y');
-  result.push_back('p');
-  result.push_back('e');
-  result.push_back(0x6A);  // text(10)
-  for (char c : std::string("public-key")) result.push_back(c);
-
+  auto result = encode(root);
+  cbor_decref(&root);
   return result;
 }
 
@@ -238,137 +165,102 @@ std::vector<uint8_t> CborEncoder::encode_cose_key(
   }
 
   // COSE_Key for ES256 (P-256)
-  // 规范键顺序 (整数键): 1, 3, -1, -2, -3
-  // 正整数先按值升序，负整数后按绝对值升序
-  std::vector<uint8_t> result;
-
-  result.push_back(0xA5);  // map(5)
+  // 整数键顺序: 正整数按值升序 (1, 3)，负整数按绝对值升序 (-1, -2, -3)
+  std::vector<std::pair<int, cbor_item_t*>> items;
 
   // 1: kty = 2 (EC2)
-  result.push_back(0x01);  // key = 1
-  result.push_back(0x02);  // value = 2
+  items.emplace_back(1, cbor_build_uint8(2));
 
   // 3: alg = -7 (ES256)
-  result.push_back(0x03);  // key = 3
-  result.push_back(0x26);  // value = -7
+  items.emplace_back(3, cbor_build_negint8(6));  // -7 = -(6+1)
 
   // -1: crv = 1 (P-256)
-  result.push_back(0x20);  // key = -1
-  result.push_back(0x01);  // value = 1
+  items.emplace_back(-1, cbor_build_uint8(1));
 
   // -2: x coordinate (32 bytes)
-  result.push_back(0x21);  // key = -2
-  result.push_back(0x58);  // bytes with 1-byte length
-  result.push_back(0x20);  // length = 32
-  result.insert(result.end(), public_key.begin() + 1, public_key.begin() + 33);
+  items.emplace_back(-2, cbor_build_bytestring(public_key.data() + 1, 32));
 
   // -3: y coordinate (32 bytes)
-  result.push_back(0x22);  // key = -3
-  result.push_back(0x58);  // bytes with 1-byte length
-  result.push_back(0x20);  // length = 32
-  result.insert(result.end(), public_key.begin() + 33, public_key.end());
+  items.emplace_back(-3, cbor_build_bytestring(public_key.data() + 33, 32));
 
+  // COSE 规范：正整数先按值排序，负整数后按绝对值排序
+  std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+    bool a_neg = a.first < 0;
+    bool b_neg = b.first < 0;
+    if (a_neg != b_neg) return !a_neg;             // 正数在前
+    if (!a_neg) return a.first < b.first;          // 正数按值升序
+    return std::abs(a.first) < std::abs(b.first);  // 负数按绝对值升序
+  });
+
+  // 构建 map
+  cbor_item_t* root = cbor_new_definite_map(items.size());
+  for (auto& [key, value] : items) {
+    cbor_item_t* key_item = key >= 0 ? cbor_build_uint8(key)
+                                     : cbor_build_negint8(std::abs(key) - 1);
+    if (!cbor_map_add(
+            root, {.key = cbor_move(key_item), .value = cbor_move(value)})) {
+      spdlog::warn("CBOR: cbor_map_add 失败");
+    }
+  }
+
+  auto result = encode(root);
+  cbor_decref(&root);
   return result;
-}
-
-// 辅助函数：编码字节串
-static void encode_bytes(std::vector<uint8_t>& result,
-                         const std::vector<uint8_t>& data) {
-  if (data.size() <= 23) {
-    result.push_back(0x40 | data.size());
-  } else if (data.size() <= 255) {
-    result.push_back(0x58);
-    result.push_back(data.size());
-  } else {
-    result.push_back(0x59);
-    result.push_back((data.size() >> 8) & 0xFF);
-    result.push_back(data.size() & 0xFF);
-  }
-  result.insert(result.end(), data.begin(), data.end());
-}
-
-// 辅助函数：编码文本串
-static void encode_text(std::vector<uint8_t>& result, const std::string& text) {
-  if (text.size() <= 23) {
-    result.push_back(0x60 | text.size());
-  } else if (text.size() <= 255) {
-    result.push_back(0x78);
-    result.push_back(text.size());
-  } else {
-    result.push_back(0x79);
-    result.push_back((text.size() >> 8) & 0xFF);
-    result.push_back(text.size() & 0xFF);
-  }
-  result.insert(result.end(), text.begin(), text.end());
 }
 
 std::vector<uint8_t> CborEncoder::encode_make_credential_response(
     const std::string& fmt, const std::vector<uint8_t>& auth_data,
     const std::vector<uint8_t>& signature,
     const std::vector<uint8_t>& x5c_cert) {
-  // MakeCredential 响应: map(3)
-  // 整数键顺序: 1, 2, 3
-  std::vector<uint8_t> result;
-
-  result.push_back(0xA3);  // map(3)
+  // MakeCredential 响应: map(3) 整数键顺序: 1, 2, 3
+  cbor_item_t* root = cbor_new_definite_map(3);
 
   // 1: fmt (string)
-  result.push_back(0x01);
-  encode_text(result, fmt);
-
-  // 2: authData (bytes)
-  result.push_back(0x02);
-  encode_bytes(result, auth_data);
-
-  // 3: attStmt (map)
-  result.push_back(0x03);
-
-  if (x5c_cert.empty()) {
-    // Self attestation: {"alg": -7, "sig": ...}
-    // 键顺序: "alg"(3) < "sig"(3)，按字典序 "alg" < "sig"
-    result.push_back(0xA2);  // map(2)
-
-    // "alg": -7
-    result.push_back(0x63);  // text(3)
-    result.push_back('a');
-    result.push_back('l');
-    result.push_back('g');
-    result.push_back(0x26);  // -7
-
-    // "sig": signature
-    result.push_back(0x63);  // text(3)
-    result.push_back('s');
-    result.push_back('i');
-    result.push_back('g');
-    encode_bytes(result, signature);
-  } else {
-    // Basic attestation: {"alg": -7, "sig": ..., "x5c": [...]}
-    // 键顺序: "alg"(3) < "sig"(3) < "x5c"(3)
-    result.push_back(0xA3);  // map(3)
-
-    // "alg": -7
-    result.push_back(0x63);  // text(3)
-    result.push_back('a');
-    result.push_back('l');
-    result.push_back('g');
-    result.push_back(0x26);  // -7
-
-    // "sig": signature
-    result.push_back(0x63);  // text(3)
-    result.push_back('s');
-    result.push_back('i');
-    result.push_back('g');
-    encode_bytes(result, signature);
-
-    // "x5c": [cert]
-    result.push_back(0x63);  // text(3)
-    result.push_back('x');
-    result.push_back('5');
-    result.push_back('c');
-    result.push_back(0x81);  // array(1)
-    encode_bytes(result, x5c_cert);
+  if (!cbor_map_add(root,
+                    {.key = cbor_move(cbor_build_uint8(1)),
+                     .value = cbor_move(cbor_build_string(fmt.c_str()))})) {
+    spdlog::warn("CBOR: cbor_map_add 失败");
   }
 
+  // 2: authData (bytes)
+  if (!cbor_map_add(root, {.key = cbor_move(cbor_build_uint8(2)),
+                           .value = cbor_move(cbor_build_bytestring(
+                               auth_data.data(), auth_data.size()))})) {
+    spdlog::warn("CBOR: cbor_map_add 失败");
+  }
+
+  // 3: attStmt (map) - 按键规范顺序
+  cbor_item_t* att_stmt;
+  if (x5c_cert.empty()) {
+    // Self attestation: {"alg": -7, "sig": ...}
+    // 键顺序: "alg" < "sig" (长度相同，按字典序)
+    std::vector<std::pair<std::string, cbor_item_t*>> att_items;
+    att_items.emplace_back("alg", cbor_build_negint8(6));  // -7
+    att_items.emplace_back(
+        "sig", cbor_build_bytestring(signature.data(), signature.size()));
+    att_stmt = build_sorted_string_map(att_items);
+  } else {
+    // Basic attestation: {"alg": -7, "sig": ..., "x5c": [...]}
+    std::vector<std::pair<std::string, cbor_item_t*>> att_items;
+    att_items.emplace_back("alg", cbor_build_negint8(6));  // -7
+    att_items.emplace_back(
+        "sig", cbor_build_bytestring(signature.data(), signature.size()));
+    cbor_item_t* x5c_arr = cbor_new_definite_array(1);
+    if (!cbor_array_push(x5c_arr, cbor_move(cbor_build_bytestring(
+                                      x5c_cert.data(), x5c_cert.size())))) {
+      spdlog::warn("CBOR: cbor_array_push 失败");
+    }
+    att_items.emplace_back("x5c", x5c_arr);
+    att_stmt = build_sorted_string_map(att_items);
+  }
+
+  if (!cbor_map_add(root, {.key = cbor_move(cbor_build_uint8(3)),
+                           .value = cbor_move(att_stmt)})) {
+    spdlog::warn("CBOR: cbor_map_add 失败");
+  }
+
+  auto result = encode(root);
+  cbor_decref(&root);
   return result;
 }
 
@@ -377,64 +269,54 @@ std::vector<uint8_t> CborEncoder::encode_get_assertion_response(
     const std::vector<uint8_t>& auth_data,
     const std::vector<uint8_t>& signature, const std::vector<uint8_t>& user_id,
     const std::string& user_name) {
-  // GetAssertion 响应: map(3 or 4)
-  // 整数键顺序: 1, 2, 3, 4
-  std::vector<uint8_t> result;
-
+  // GetAssertion 响应: map(3 or 4) 整数键顺序: 1, 2, 3, 4
   bool has_user = !user_id.empty();
-  result.push_back(has_user ? 0xA4 : 0xA3);  // map(4) or map(3)
+  cbor_item_t* root = cbor_new_definite_map(has_user ? 4 : 3);
 
-  // 1: credential
-  result.push_back(0x01);
-  // credential map: {"id": bytes, "type": "public-key"}
-  // 键顺序: "id"(2) < "type"(4)
-  result.push_back(0xA2);  // map(2)
-  // "id"
-  result.push_back(0x62);  // text(2)
-  result.push_back('i');
-  result.push_back('d');
-  encode_bytes(result, credential_id);
-  // "type"
-  result.push_back(0x64);  // text(4)
-  result.push_back('t');
-  result.push_back('y');
-  result.push_back('p');
-  result.push_back('e');
-  encode_text(result, "public-key");
-
-  // 2: authData
-  result.push_back(0x02);
-  encode_bytes(result, auth_data);
-
-  // 3: signature
-  result.push_back(0x03);
-  encode_bytes(result, signature);
-
-  // 4: user (optional)
-  if (has_user) {
-    result.push_back(0x04);
-    // user map: {"id": bytes} or {"id": bytes, "name": string}
-    // 键顺序: "id"(2) < "name"(4)
-    bool has_name = !user_name.empty();
-    result.push_back(has_name ? 0xA2 : 0xA1);  // map(2) or map(1)
-
-    // "id"
-    result.push_back(0x62);  // text(2)
-    result.push_back('i');
-    result.push_back('d');
-    encode_bytes(result, user_id);
-
-    // "name" (if present)
-    if (has_name) {
-      result.push_back(0x64);  // text(4)
-      result.push_back('n');
-      result.push_back('a');
-      result.push_back('m');
-      result.push_back('e');
-      encode_text(result, user_name);
+  // 1: credential - 按键规范顺序 ("id" < "type")
+  {
+    std::vector<std::pair<std::string, cbor_item_t*>> cred_items;
+    cred_items.emplace_back("id", cbor_build_bytestring(credential_id.data(),
+                                                        credential_id.size()));
+    cred_items.emplace_back("type", cbor_build_string("public-key"));
+    if (!cbor_map_add(
+            root, {.key = cbor_move(cbor_build_uint8(1)),
+                   .value = cbor_move(build_sorted_string_map(cred_items))})) {
+      spdlog::warn("CBOR: cbor_map_add 失败");
     }
   }
 
+  // 2: authData
+  if (!cbor_map_add(root, {.key = cbor_move(cbor_build_uint8(2)),
+                           .value = cbor_move(cbor_build_bytestring(
+                               auth_data.data(), auth_data.size()))})) {
+    spdlog::warn("CBOR: cbor_map_add 失败");
+  }
+
+  // 3: signature
+  if (!cbor_map_add(root, {.key = cbor_move(cbor_build_uint8(3)),
+                           .value = cbor_move(cbor_build_bytestring(
+                               signature.data(), signature.size()))})) {
+    spdlog::warn("CBOR: cbor_map_add 失败");
+  }
+
+  // 4: user (optional) - 按键规范顺序 ("id" < "name")
+  if (has_user) {
+    std::vector<std::pair<std::string, cbor_item_t*>> user_items;
+    user_items.emplace_back(
+        "id", cbor_build_bytestring(user_id.data(), user_id.size()));
+    if (!user_name.empty()) {
+      user_items.emplace_back("name", cbor_build_string(user_name.c_str()));
+    }
+    if (!cbor_map_add(
+            root, {.key = cbor_move(cbor_build_uint8(4)),
+                   .value = cbor_move(build_sorted_string_map(user_items))})) {
+      spdlog::warn("CBOR: cbor_map_add 失败");
+    }
+  }
+
+  auto result = encode(root);
+  cbor_decref(&root);
   return result;
 }
 
