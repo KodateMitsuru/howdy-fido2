@@ -13,9 +13,9 @@
 #include <openssl/sha.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+#include <spdlog/spdlog.h>
 
 #include <cstring>
-#include <iostream>
 
 namespace howdy {
 
@@ -51,25 +51,24 @@ bool ECKeyPair::generate() {
 
   EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
   if (!ctx) {
-    std::cerr << "Crypto: EVP_PKEY_CTX_new_id failed" << std::endl;
+    spdlog::error("Crypto: EVP_PKEY_CTX_new_id failed");
     return false;
   }
 
   if (EVP_PKEY_keygen_init(ctx) <= 0) {
-    std::cerr << "Crypto: EVP_PKEY_keygen_init failed" << std::endl;
+    spdlog::error("Crypto: EVP_PKEY_keygen_init failed");
     EVP_PKEY_CTX_free(ctx);
     return false;
   }
 
   if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) <= 0) {
-    std::cerr << "Crypto: EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed"
-              << std::endl;
+    spdlog::error("Crypto: EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed");
     EVP_PKEY_CTX_free(ctx);
     return false;
   }
 
   if (EVP_PKEY_keygen(ctx, &pkey_) <= 0) {
-    std::cerr << "Crypto: EVP_PKEY_keygen failed" << std::endl;
+    spdlog::error("Crypto: EVP_PKEY_keygen failed");
     EVP_PKEY_CTX_free(ctx);
     return false;
   }
@@ -86,14 +85,14 @@ std::vector<uint8_t> ECKeyPair::get_public_key() const {
   size_t len = 0;
   if (EVP_PKEY_get_octet_string_param(pkey_, OSSL_PKEY_PARAM_PUB_KEY, nullptr,
                                       0, &len) != 1) {
-    std::cerr << "Crypto: Failed to get public key length" << std::endl;
+    spdlog::error("Crypto: Failed to get public key length");
     return result;
   }
 
   result.resize(len);
   if (EVP_PKEY_get_octet_string_param(pkey_, OSSL_PKEY_PARAM_PUB_KEY,
                                       result.data(), len, &len) != 1) {
-    std::cerr << "Crypto: Failed to get public key" << std::endl;
+    spdlog::error("Crypto: Failed to get public key");
     return {};
   }
 
@@ -106,7 +105,7 @@ std::vector<uint8_t> ECKeyPair::get_private_key() const {
 
   BIGNUM* priv_bn = nullptr;
   if (EVP_PKEY_get_bn_param(pkey_, OSSL_PKEY_PARAM_PRIV_KEY, &priv_bn) != 1) {
-    std::cerr << "Crypto: Failed to get private key" << std::endl;
+    spdlog::error("Crypto: Failed to get private key");
     return result;
   }
 
@@ -126,7 +125,7 @@ std::vector<uint8_t> ECKeyPair::get_private_key() const {
 
 bool ECKeyPair::set_private_key(const std::vector<uint8_t>& private_key) {
   if (private_key.size() != 32) {
-    std::cerr << "Crypto: Invalid private key size" << std::endl;
+    spdlog::error("Crypto: Invalid private key size");
     return false;
   }
 
@@ -138,8 +137,7 @@ bool ECKeyPair::set_private_key(const std::vector<uint8_t>& private_key) {
   // 从私钥创建 BIGNUM
   BIGNUM* priv_bn = BN_bin2bn(private_key.data(), private_key.size(), nullptr);
   if (!priv_bn) {
-    std::cerr << "Crypto: Failed to create BIGNUM from private key"
-              << std::endl;
+    spdlog::error("Crypto: Failed to create BIGNUM from private key");
     return false;
   }
 

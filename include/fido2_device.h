@@ -6,6 +6,7 @@
 
 #include "crypto.h"
 #include "pam_auth.h"
+#include "tpm_storage.h"
 #include "uhid_device.h"
 
 namespace howdy {
@@ -98,6 +99,11 @@ class FIDO2Device {
   // Attestation 密钥对 (用于签署注册响应)
   ECKeyPair attestation_key_;
   std::vector<uint8_t> attestation_cert_;
+
+  // TPM 存储
+  TPMStorage tpm_storage_;
+  bool load_credentials_from_tpm();
+  bool save_credentials_to_tpm();
 
   // 验证配置
   bool use_pam_ = true;

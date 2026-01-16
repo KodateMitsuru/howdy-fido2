@@ -3,10 +3,10 @@
 #include <fcntl.h>
 #include <linux/uhid.h>
 #include <poll.h>
+#include <spdlog/spdlog.h>
 #include <unistd.h>
 
 #include <cstring>
-#include <iostream>
 
 namespace howdy {
 
@@ -47,8 +47,8 @@ bool UHIDDevice::create() {
   // 打开 UHID 设备
   uhid_fd_ = open("/dev/uhid", O_RDWR | O_CLOEXEC);
   if (uhid_fd_ < 0) {
-    std::cerr << "无法打开 /dev/uhid: " << strerror(errno) << std::endl;
-    std::cerr << "请确保有足够权限或使用 sudo 运行" << std::endl;
+    spdlog::error("无法打开 /dev/uhid: {}", strerror(errno));
+    spdlog::error("请确保有足够权限或使用 sudo 运行");
     return false;
   }
 
@@ -73,7 +73,7 @@ bool UHIDDevice::create() {
 
   ssize_t ret = write(uhid_fd_, &ev, sizeof(ev));
   if (ret < 0) {
-    std::cerr << "创建 UHID 设备失败: " << strerror(errno) << std::endl;
+    spdlog::error("创建 UHID 设备失败: {}", strerror(errno));
     close(uhid_fd_);
     uhid_fd_ = -1;
     return false;
@@ -82,7 +82,7 @@ bool UHIDDevice::create() {
   running_.store(true);
   event_thread_ = std::thread(&UHIDDevice::event_loop, this);
 
-  std::cout << "FIDO2 虚拟设备创建成功: " << device_name_ << std::endl;
+  spdlog::info("FIDO2 虚拟设备创建成功: {}", device_name_);
   return true;
 }
 
@@ -106,7 +106,7 @@ void UHIDDevice::destroy() {
     event_thread_.join();
   }
 
-  std::cout << "FIDO2 虚拟设备已销毁" << std::endl;
+  spdlog::info("FIDO2 虚拟设备已销毁");
 }
 
 bool UHIDDevice::send_input(const std::vector<uint8_t>& data) {
@@ -133,7 +133,7 @@ void UHIDDevice::event_loop() {
     int ret = poll(&pfd, 1, 100);  // 100ms 超时
     if (ret < 0) {
       if (errno == EINTR) continue;
-      std::cerr << "poll 错误: " << strerror(errno) << std::endl;
+      spdlog::error("poll 错误: {}", strerror(errno));
       break;
     }
 
@@ -153,25 +153,25 @@ bool UHIDDevice::handle_uhid_event() {
     if (errno == EINTR || errno == EAGAIN) {
       return true;
     }
-    std::cerr << "读取 UHID 事件失败: " << strerror(errno) << std::endl;
+    spdlog::error("读取 UHID 事件失败: {}", strerror(errno));
     return false;
   }
 
   switch (ev.type) {
     case UHID_START:
-      std::cout << "UHID: 设备已启动" << std::endl;
+      spdlog::debug("UHID: 设备已启动");
       break;
 
     case UHID_STOP:
-      std::cout << "UHID: 设备已停止" << std::endl;
+      spdlog::debug("UHID: 设备已停止");
       break;
 
     case UHID_OPEN:
-      std::cout << "UHID: 设备已打开" << std::endl;
+      spdlog::debug("UHID: 设备已打开");
       break;
 
     case UHID_CLOSE:
-      std::cout << "UHID: 设备已关闭" << std::endl;
+      spdlog::debug("UHID: 设备已关闭");
       break;
 
     case UHID_OUTPUT:

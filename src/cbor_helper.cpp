@@ -1,8 +1,9 @@
 #include "cbor_helper.h"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <cstring>
-#include <iostream>
 
 namespace howdy {
 
@@ -25,7 +26,7 @@ std::vector<uint8_t> CborEncoder::encode(cbor_item_t* item) {
     buffer_size *= 2;
     buffer.resize(buffer_size);
     if (buffer_size > 64 * 1024) {
-      std::cerr << "CBOR: 编码缓冲区过大" << std::endl;
+      spdlog::error("CBOR: 编码缓冲区过大");
       return {};
     }
   }
@@ -232,7 +233,7 @@ std::vector<uint8_t> CborEncoder::encode_cose_key(
     const std::vector<uint8_t>& public_key) {
   // 公钥格式: 04 || x(32) || y(32)
   if (public_key.size() != 65 || public_key[0] != 0x04) {
-    std::cerr << "CBOR: 无效的公钥格式" << std::endl;
+    spdlog::error("CBOR: 无效的公钥格式");
     return {};
   }
 
@@ -472,7 +473,7 @@ CborDecoder::MakeCredentialRequest CborDecoder::parse_make_credential(
 
   if (result.error.code != CBOR_ERR_NONE || !item || !cbor_isa_map(item)) {
     if (item) cbor_decref(&item);
-    std::cerr << "CBOR: 解析 MakeCredential 请求失败" << std::endl;
+    spdlog::error("CBOR: 解析 MakeCredential 请求失败");
     return req;
   }
 
@@ -579,11 +580,13 @@ CborDecoder::MakeCredentialRequest CborDecoder::parse_make_credential(
                   cbor_get_bool(ext_pairs[j].value) ? 1 : 0;
             }
           }
-          std::cout << "CBOR: 收到扩展请求: ";
-          for (const auto& [k, v] : req.extensions) {
-            std::cout << k << "=" << v << " ";
-          }
-          std::cout << std::endl;
+          spdlog::debug("CBOR: 收到扩展请求: {}", [&req]() {
+            std::string s;
+            for (const auto& [k, v] : req.extensions) {
+              s += k + "=" + std::to_string(v) + " ";
+            }
+            return s;
+          }());
         }
         break;
 
@@ -605,8 +608,8 @@ CborDecoder::MakeCredentialRequest CborDecoder::parse_make_credential(
   req.valid = !req.client_data_hash.empty() && !req.rp_id.empty();
   cbor_decref(&item);
 
-  std::cout << "CBOR: MakeCredential 解析完成 - rp_id=" << req.rp_id
-            << ", user=" << req.user_name << std::endl;
+  spdlog::debug("CBOR: MakeCredential 解析完成 - rp_id={}, user={}", req.rp_id,
+                req.user_name);
 
   return req;
 }
@@ -621,7 +624,7 @@ CborDecoder::GetAssertionRequest CborDecoder::parse_get_assertion(
 
   if (result.error.code != CBOR_ERR_NONE || !item || !cbor_isa_map(item)) {
     if (item) cbor_decref(&item);
-    std::cerr << "CBOR: 解析 GetAssertion 请求失败" << std::endl;
+    spdlog::error("CBOR: 解析 GetAssertion 请求失败");
     return req;
   }
 
@@ -678,7 +681,7 @@ CborDecoder::GetAssertionRequest CborDecoder::parse_get_assertion(
   req.valid = !req.rp_id.empty() && !req.client_data_hash.empty();
   cbor_decref(&item);
 
-  std::cout << "CBOR: GetAssertion 解析完成 - rp_id=" << req.rp_id << std::endl;
+  spdlog::debug("CBOR: GetAssertion 解析完成 - rp_id={}", req.rp_id);
 
   return req;
 }

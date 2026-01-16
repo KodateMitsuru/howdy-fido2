@@ -2,12 +2,12 @@
 
 #include <pwd.h>
 #include <security/pam_appl.h>
+#include <spdlog/spdlog.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstring>
 #include <future>
-#include <iostream>
 #include <thread>
 
 namespace howdy {
@@ -41,13 +41,13 @@ static int pam_conversation(int num_msg, const struct pam_message** msg,
         break;
 
       case PAM_ERROR_MSG:
-        std::cerr << "PAM Error: " << m->msg << std::endl;
+        spdlog::error("PAM Error: {}", m->msg);
         (*resp)[i].resp = nullptr;
         (*resp)[i].resp_retcode = 0;
         break;
 
       case PAM_TEXT_INFO:
-        std::cout << "PAM Info: " << m->msg << std::endl;
+        spdlog::debug("PAM Info: {}", m->msg);
         if (conv_data && conv_data->prompt_callback &&
             *conv_data->prompt_callback) {
           (*conv_data->prompt_callback)(m->msg);
@@ -87,8 +87,7 @@ PAMResult PAMAuthenticator::authenticate(const std::string& username) {
     }
   }
 
-  std::cout << "PAM: 开始验证用户 '" << user << "' (服务: " << service_name_
-            << ")" << std::endl;
+  spdlog::debug("PAM: 开始验证用户 '{}' (服务: {})", user, service_name_);
 
   // 使用异步执行 PAM 验证，以支持超时
   // 注意: 使用值捕获 user，避免引用悬空
@@ -104,7 +103,7 @@ PAMResult PAMAuthenticator::authenticate(const std::string& username) {
     int ret = pam_start(service_name_.c_str(), user.c_str(), &conv, &pamh);
     if (ret != PAM_SUCCESS) {
       last_error_ = std::string("pam_start 失败: ") + pam_strerror(pamh, ret);
-      std::cerr << "PAM: " << last_error_ << std::endl;
+      spdlog::error("PAM: {}", last_error_);
       return PAMResult::ERROR;
     }
 
@@ -114,31 +113,31 @@ PAMResult PAMAuthenticator::authenticate(const std::string& username) {
     pam_set_item(pamh, PAM_RUSER, user.c_str());
 
     // 执行验证 - 不使用 PAM_SILENT，让 howdy 可以正常交互
-    std::cout << "PAM: 等待验证..." << std::endl;
+    spdlog::debug("PAM: 等待验证...");
     ret = pam_authenticate(pamh, 0);
 
     PAMResult result;
     if (ret == PAM_SUCCESS) {
       // pam_authenticate 成功即可，跳过 pam_acct_mgmt
       // 因为 pam_howdy 返回 PAM_IGNORE，可能导致账户检查失败
-      std::cout << "PAM: ✓ 验证成功!" << std::endl;
+      spdlog::debug("PAM: ✓ 验证成功!");
       result = PAMResult::SUCCESS;
     } else if (ret == PAM_AUTH_ERR) {
       last_error_ = "验证失败";
-      std::cout << "PAM: ✗ 验证失败" << std::endl;
+      spdlog::debug("PAM: ✗ 验证失败");
       result = PAMResult::AUTH_FAILED;
     } else if (ret == PAM_USER_UNKNOWN) {
       last_error_ = "用户不存在";
-      std::cout << "PAM: ✗ 用户不存在" << std::endl;
+      spdlog::debug("PAM: ✗ 用户不存在");
       result = PAMResult::AUTH_FAILED;
     } else if (ret == PAM_MAXTRIES) {
       last_error_ = "达到最大尝试次数";
-      std::cout << "PAM: ✗ 达到最大尝试次数" << std::endl;
+      spdlog::debug("PAM: ✗ 达到最大尝试次数");
       result = PAMResult::AUTH_FAILED;
     } else {
       last_error_ = std::string("PAM 错误 (") + std::to_string(ret) +
                     "): " + pam_strerror(pamh, ret);
-      std::cerr << "PAM: " << last_error_ << std::endl;
+      spdlog::error("PAM: {}", last_error_);
       result = PAMResult::ERROR;
     }
 
@@ -151,7 +150,7 @@ PAMResult PAMAuthenticator::authenticate(const std::string& username) {
   auto status = future.wait_for(std::chrono::seconds(timeout_seconds_));
   if (status == std::future_status::timeout) {
     last_error_ = "验证超时";
-    std::cout << "PAM: ✗ 验证超时 (" << timeout_seconds_ << " 秒)" << std::endl;
+    spdlog::warn("PAM: ✗ 验证超时 ({} 秒)", timeout_seconds_);
     return PAMResult::USER_CANCELLED;
   }
 
