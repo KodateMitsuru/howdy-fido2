@@ -573,7 +573,7 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   cred.user_id = req.user_id;
   cred.user_name = req.user_name;
   cred.rp_id = req.rp_id;
-  cred.counter = 0;
+  cred.counter = 1;  // 初始计数器设为 1，MakeCredential 响应将使用此值
   credentials_[credential_id] = cred;
 
   // 通知客户端凭据已变更
@@ -602,8 +602,8 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   uint8_t flags = has_extensions ? 0xC5 : 0x45;
   auth_data.push_back(flags);
 
-  // Counter (4 bytes, big-endian)
-  uint32_t counter = ++cred.counter;
+  // Counter (4 bytes, big-endian) - 使用保存在 credentials_ 中的值
+  uint32_t counter = credentials_[credential_id].counter;
   auth_data.push_back((counter >> 24) & 0xFF);
   auth_data.push_back((counter >> 16) & 0xFF);
   auth_data.push_back((counter >> 8) & 0xFF);
@@ -780,6 +780,8 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
   // 增加计数器
   found_cred->counter++;
   uint32_t counter = found_cred->counter;
+
+  spdlog::info("CTAP2: GetAssertion counter: {} -> {}", counter - 1, counter);
 
   // 通知客户端凭据已变更（计数器更新）
   notify_credentials_changed();
@@ -973,8 +975,11 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_register_response(
   cred.key_handle = key_handle;
   cred.private_key = private_key;
   cred.app_id = app_id;
-  cred.counter = 0;
+  cred.counter = 0;  // U2F 注册时 counter=0，认证时从 1 开始
   credentials_[key_handle] = cred;
+
+  // 通知客户端凭据已变更
+  notify_credentials_changed();
 
   spdlog::debug("U2F: 凭据已保存，key_handle {} 字节", key_handle.size());
 
