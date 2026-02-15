@@ -4,8 +4,8 @@
 #include <openssl/evp.h>
 
 #include <cstdint>
-#include <memory>
 #include <vector>
+#include <string>
 
 namespace howdy {
 

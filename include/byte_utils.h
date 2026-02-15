@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <cstring>
 #include <ranges>
-#include <vector>
 
 namespace howdy {
 
