@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <ranges>
 
 namespace howdy {
 
@@ -38,7 +39,7 @@ std::vector<uint8_t> CborEncoder::encode(cbor_item_t* item) {
 static cbor_item_t* build_sorted_string_map(
     std::vector<std::pair<std::string, cbor_item_t*>>& items) {
   // 按规范顺序排序
-  std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+  std::ranges::sort(items, [](const auto& a, const auto& b) {
     if (a.first.size() != b.first.size())
       return a.first.size() < b.first.size();
     return a.first < b.first;
@@ -60,7 +61,7 @@ std::vector<uint8_t> CborEncoder::encode_get_info(
     const std::vector<std::string>& versions,
     const std::vector<std::string>& extensions,
     const std::vector<uint8_t>& aaguid,
-    const std::map<std::string, bool>& options, uint32_t max_msg_size,
+    const std::flat_map<std::string, uint8_t>& options, uint32_t max_msg_size,
     const std::vector<int>& pin_protocols, int max_cred_count,
     int max_cred_id_length) {
   // CTAP2 GetInfo 响应使用整数键，按数值排序: 1, 2, 3, 4, 5, 6, 7, 8, 10
@@ -139,8 +140,7 @@ std::vector<uint8_t> CborEncoder::encode_get_info(
   }
 
   // 按键排序（整数键按值升序）
-  std::sort(items.begin(), items.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::ranges::sort(items, {}, &std::pair<int, cbor_item_t*>::first);
 
   // 构建最终 map
   cbor_item_t* root = cbor_new_definite_map(items.size());
@@ -184,7 +184,7 @@ std::vector<uint8_t> CborEncoder::encode_cose_key(
   items.emplace_back(-3, cbor_build_bytestring(public_key.data() + 33, 32));
 
   // COSE 规范：正整数先按值排序，负整数后按绝对值排序
-  std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+  std::ranges::sort(items, [](const auto& a, const auto& b) {
     bool a_neg = a.first < 0;
     bool b_neg = b.first < 0;
     if (a_neg != b_neg) return !a_neg;             // 正数在前

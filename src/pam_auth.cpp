@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <format>
 #include <future>
 #include <thread>
 
@@ -100,7 +101,7 @@ PAMResult PAMAuthenticator::authenticate(const std::string& username) {
     // 初始化 PAM
     int ret = pam_start(service_name_.c_str(), user.c_str(), &conv, &pamh);
     if (ret != PAM_SUCCESS) {
-      last_error_ = std::string("pam_start 失败: ") + pam_strerror(pamh, ret);
+      last_error_ = std::format("pam_start 失败: {}", pam_strerror(pamh, ret));
       spdlog::error("PAM: {}", last_error_);
       return PAMResult::ERROR;
     }
@@ -129,8 +130,8 @@ PAMResult PAMAuthenticator::authenticate(const std::string& username) {
       spdlog::debug("PAM: ✗ 达到最大尝试次数");
       result = PAMResult::AUTH_FAILED;
     } else {
-      last_error_ = std::string("PAM 错误 (") + std::to_string(ret) +
-                    "): " + pam_strerror(pamh, ret);
+      last_error_ =
+          std::format("PAM 错误 ({}): {}", ret, pam_strerror(pamh, ret));
       spdlog::error("PAM: {}", last_error_);
       result = PAMResult::ERROR;
     }

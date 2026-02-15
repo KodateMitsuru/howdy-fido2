@@ -9,7 +9,6 @@
  * 以普通用户权限运行
  */
 
-#include <fmt/format.h>
 #include <spdlog/spdlog.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -19,6 +18,7 @@
 #include <csignal>
 #include <filesystem>
 #include <fstream>
+#include <print>
 
 #include "dbus_interface.h"
 #include "pam_auth.h"
@@ -33,7 +33,7 @@ void signal_handler(int signum) {
 }
 
 void print_usage(const char* program) {
-  fmt::print(
+  std::print(
       "用法: {} [选项]\n\n"
       "选项:\n"
       "  -s, --service NAME  PAM 服务名 (默认: howdy-fido2)\n"

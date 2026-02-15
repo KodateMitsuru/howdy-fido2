@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <concepts>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -71,8 +72,10 @@ class UHIDDevice {
   bool send_input(const std::vector<uint8_t>& data);
 
   // 设置输出报告处理回调
-  void set_output_handler(OutputHandler handler) {
-    output_handler_ = std::move(handler);
+  template <typename F>
+    requires std::invocable<F, const std::vector<uint8_t>&>
+  void set_output_handler(F&& handler) {
+    output_handler_ = std::forward<F>(handler);
   }
 
  private:

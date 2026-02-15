@@ -2,6 +2,7 @@
 
 #include <sdbus-c++/sdbus-c++.h>
 
+#include <concepts>
 #include <functional>
 #include <memory>
 #include <string>
@@ -64,17 +65,34 @@ class DBusServer {
   void notify_credentials_changed();
 
   // 设置回调
-  void set_tpm_seal_callback(TPMSealCallback cb) {
-    tpm_seal_cb_ = std::move(cb);
+  template <typename F>
+    requires std::invocable<F, const std::vector<uint8_t>&> &&
+             std::convertible_to<
+                 std::invoke_result_t<F, const std::vector<uint8_t>&>,
+                 std::vector<uint8_t>>
+  void set_tpm_seal_callback(F&& cb) {
+    tpm_seal_cb_ = std::forward<F>(cb);
   }
-  void set_tpm_unseal_callback(TPMUnsealCallback cb) {
-    tpm_unseal_cb_ = std::move(cb);
+  template <typename F>
+    requires std::invocable<F, const std::vector<uint8_t>&> &&
+             std::convertible_to<
+                 std::invoke_result_t<F, const std::vector<uint8_t>&>,
+                 std::vector<uint8_t>>
+  void set_tpm_unseal_callback(F&& cb) {
+    tpm_unseal_cb_ = std::forward<F>(cb);
   }
-  void set_credentials_load_callback(CredentialsLoadCallback cb) {
-    cred_load_cb_ = std::move(cb);
+  template <typename F>
+    requires std::invocable<F, const std::vector<uint8_t>&> &&
+             std::convertible_to<
+                 std::invoke_result_t<F, const std::vector<uint8_t>&>, bool>
+  void set_credentials_load_callback(F&& cb) {
+    cred_load_cb_ = std::forward<F>(cb);
   }
-  void set_credentials_get_callback(CredentialsGetCallback cb) {
-    cred_get_cb_ = std::move(cb);
+  template <typename F>
+    requires std::invocable<F> &&
+             std::convertible_to<std::invoke_result_t<F>, std::vector<uint8_t>>
+  void set_credentials_get_callback(F&& cb) {
+    cred_get_cb_ = std::forward<F>(cb);
   }
 
  private:
@@ -133,11 +151,18 @@ class DBusClient {
   bool is_service_ready();
 
   // 设置回调
-  void set_pam_callback(PAMCallback callback) {
-    pam_callback_ = std::move(callback);
+  template <typename F>
+    requires std::invocable<F, const std::string&, const std::string&> &&
+             std::convertible_to<std::invoke_result_t<F, const std::string&,
+                                                      const std::string&>,
+                                 bool>
+  void set_pam_callback(F&& callback) {
+    pam_callback_ = std::forward<F>(callback);
   }
-  void set_credentials_changed_callback(CredentialsChangedCallback cb) {
-    cred_changed_cb_ = std::move(cb);
+  template <typename F>
+    requires std::invocable<F>
+  void set_credentials_changed_callback(F&& cb) {
+    cred_changed_cb_ = std::forward<F>(cb);
   }
 
   // 运行事件循环（单次）

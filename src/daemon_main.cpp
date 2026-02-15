@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <csignal>
+#include <print>
 
 #include "dbus_interface.h"
 #include "fido2_device.h"
@@ -28,7 +29,7 @@ void signal_handler(int signum) {
 }
 
 void print_usage(const char* program) {
-  fmt::print(
+  std::print(
       "用法: {} [选项]\n\n"
       "选项:\n"
       "  -D, --debug    启用调试输出\n"

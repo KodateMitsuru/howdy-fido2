@@ -3,10 +3,13 @@
 #include <spdlog/fmt/bin_to_hex.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <utility>
 
+#include "byte_utils.h"
 #include "cbor_helper.h"
 #include "pam_auth.h"
 #include "tpm_storage.h"  // for CredentialSerializer
@@ -84,10 +87,7 @@ void FIDO2Device::handle_ctaphid_message(const std::vector<uint8_t>& data) {
   }
 
   // 解析 Channel ID
-  uint32_t channel_id = (static_cast<uint32_t>(data[offset + 0]) << 24) |
-                        (static_cast<uint32_t>(data[offset + 1]) << 16) |
-                        (static_cast<uint32_t>(data[offset + 2]) << 8) |
-                        static_cast<uint32_t>(data[offset + 3]);
+  uint32_t channel_id = read_be32(data.data() + offset);
 
   uint8_t cmd_byte = data[offset + 4];
 
@@ -154,7 +154,8 @@ void FIDO2Device::handle_ctaphid_message(const std::vector<uint8_t>& data) {
   }
 
   spdlog::debug("CTAPHID: CID={:#010X} CMD={:#04X} LEN={} (收到 {} 字节)",
-                channel_id, static_cast<int>(cmd), payload_len, payload.size());
+                channel_id, std::to_underlying(cmd), payload_len,
+                payload.size());
 
   // 如果需要更多数据，保存待处理消息
   if (payload_len > payload.size()) {
@@ -181,7 +182,7 @@ void FIDO2Device::process_complete_message(uint32_t channel_id, uint8_t cmd,
   switch (static_cast<CTAPHIDCommand>(cmd)) {
     case CTAPHIDCommand::INIT:
       if (data.size() >= 8) {
-        handle_init(channel_id, data.data());
+        handle_init(channel_id, std::span<const uint8_t, 8>{data.data(), 8});
       } else {
         send_error(channel_id, CTAPHIDError::INVALID_LEN);
       }
@@ -215,13 +216,14 @@ void FIDO2Device::process_complete_message(uint32_t channel_id, uint8_t cmd,
   }
 }
 
-void FIDO2Device::handle_init(uint32_t channel_id, const uint8_t* nonce) {
+void FIDO2Device::handle_init(uint32_t channel_id,
+                              std::span<const uint8_t, 8> nonce) {
   spdlog::debug("CTAPHID: 处理 INIT 命令");
 
   CTAPHIDInitResponse resp{};
 
   // 复制 nonce
-  memcpy(resp.nonce, nonce, 8);
+  std::copy_n(nonce.data(), 8, resp.nonce);
 
   // 分配或返回通道ID
   if (channel_id == CTAPHID_BROADCAST_CID) {
@@ -240,16 +242,13 @@ void FIDO2Device::handle_init(uint32_t channel_id, const uint8_t* nonce) {
   // 注册通道
   {
     std::lock_guard<std::mutex> lock(channels_mutex_);
-    active_channels_[resp.channel_id] = true;
+    active_channels_.insert(resp.channel_id);
   }
 
   // 构造响应数据
   std::vector<uint8_t> response_data(17);
-  memcpy(response_data.data(), resp.nonce, 8);
-  response_data[8] = (resp.channel_id >> 24) & 0xFF;
-  response_data[9] = (resp.channel_id >> 16) & 0xFF;
-  response_data[10] = (resp.channel_id >> 8) & 0xFF;
-  response_data[11] = resp.channel_id & 0xFF;
+  std::copy_n(resp.nonce, 8, response_data.data());
+  write_be32_at(response_data.data() + 8, resp.channel_id);
   response_data[12] = resp.protocol_version;
   response_data[13] = resp.device_major;
   response_data[14] = resp.device_minor;
@@ -329,11 +328,10 @@ std::vector<uint8_t> FIDO2Device::handle_get_info() {
   std::vector<std::string> extensions = {"credProtect", "hmac-secret"};
 
   // AAGUID (16 bytes)
-  std::vector<uint8_t> aaguid = {'H', 'O', 'W', 'D', 'Y', 'F', 'I', 'D',
-                                 'O', '2', 'D', 'E', 'V', 'I', 'C', 'E'};
+  std::vector<uint8_t> aaguid(AAGUID.begin(), AAGUID.end());
 
   // Options - 按字母序排列 (libcbor 会自动处理)
-  std::map<std::string, bool> options = {
+  std::flat_map<std::string, uint8_t> options = {
       {"clientPin", false}, {"credMgmt", true}, {"plat", false},
       {"rk", true},         {"up", true},       {"uv", true}};
 
@@ -352,7 +350,7 @@ std::vector<uint8_t> FIDO2Device::handle_get_info() {
   // 添加状态码
   std::vector<uint8_t> response;
   response.push_back(CTAP2_OK);
-  response.insert(response.end(), cbor_data.begin(), cbor_data.end());
+  response.append_range(cbor_data);
 
   spdlog::debug("CTAP2: 返回设备信息 ({} 字节)", response.size());
 
@@ -496,10 +494,11 @@ bool FIDO2Device::verify_user(const std::string& operation) {
         result = false;
         break;
       case PAMResult::ERROR:
-      default:
         spdlog::error("⚠️  PAM 错误: {}", pam.last_error());
         result = false;
         break;
+      default:
+        std::unreachable();
     }
   }
 
@@ -562,8 +561,7 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
 
   // 生成凭证 ID (包含加密的私钥信息)
   std::vector<uint8_t> credential_id = CryptoUtils::random_bytes(16);
-  credential_id.insert(credential_id.end(), private_key.begin(),
-                       private_key.end());
+  credential_id.append_range(private_key);
 
   // 保存凭据
   StoredCredential cred;
@@ -585,7 +583,7 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   // 检查是否有扩展请求
   bool has_extensions = !req.extensions.empty();
   int cred_protect_level = 0;
-  if (req.extensions.count("credProtect")) {
+  if (req.extensions.contains("credProtect")) {
     cred_protect_level = req.extensions.at("credProtect");
     spdlog::debug("CTAP2: 收到 credProtect={}", cred_protect_level);
   }
@@ -594,7 +592,7 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   std::vector<uint8_t> auth_data;
 
   // RP ID hash (32 bytes)
-  auth_data.insert(auth_data.end(), rp_id_hash.begin(), rp_id_hash.end());
+  auth_data.append_range(rp_id_hash);
 
   // Flags: UP=1, UV=1, AT=1, ED=1(if extensions)
   // 0x45 = 01000101 (UP | UV | AT)
@@ -604,22 +602,17 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
 
   // Counter (4 bytes, big-endian) - 使用保存在 credentials_ 中的值
   uint32_t counter = credentials_[credential_id].counter;
-  auth_data.push_back((counter >> 24) & 0xFF);
-  auth_data.push_back((counter >> 16) & 0xFF);
-  auth_data.push_back((counter >> 8) & 0xFF);
-  auth_data.push_back(counter & 0xFF);
+  write_be32(auth_data, counter);
 
   // AAGUID (16 bytes)
-  const char* aaguid = "HOWDYFIDO2DEVICE";
-  for (int i = 0; i < 16; ++i) auth_data.push_back(aaguid[i]);
+  auth_data.append_range(AAGUID);
 
   // Credential ID length (2 bytes, big-endian)
   uint16_t cred_id_len = static_cast<uint16_t>(credential_id.size());
-  auth_data.push_back((cred_id_len >> 8) & 0xFF);
-  auth_data.push_back(cred_id_len & 0xFF);
+  write_be16(auth_data, cred_id_len);
 
   // Credential ID
-  auth_data.insert(auth_data.end(), credential_id.begin(), credential_id.end());
+  auth_data.append_range(credential_id);
 
   // Credential Public Key (COSE_Key format) - 使用 libcbor 编码
   std::vector<uint8_t> cose_key = CborEncoder::encode_cose_key(public_key);
@@ -627,7 +620,7 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
     spdlog::error("CTAP2: COSE Key 编码失败");
     return {CTAP2_ERR_UNHANDLED_REQUEST};
   }
-  auth_data.insert(auth_data.end(), cose_key.begin(), cose_key.end());
+  auth_data.append_range(cose_key);
 
   // Extensions (如果有)
   if (has_extensions) {
@@ -672,7 +665,7 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
     response.push_back((auth_data.size() >> 8) & 0xFF);
     response.push_back(auth_data.size() & 0xFF);
   }
-  response.insert(response.end(), auth_data.begin(), auth_data.end());
+  response.append_range(auth_data);
 
   // 3: attStmt = {} (空 map)
   response.push_back(0x03);
@@ -705,21 +698,16 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
   bool has_credential = false;
 
   if (!req.allow_list.empty()) {
-    for (const auto& allowed_id : req.allow_list) {
-      auto it = credentials_.find(allowed_id);
-      if (it != credentials_.end() && it->second.app_id == rp_id_hash) {
-        has_credential = true;
-        break;
-      }
-    }
+    has_credential =
+        std::ranges::any_of(req.allow_list, [&](const auto& allowed_id) {
+          auto it = credentials_.find(allowed_id);
+          return it != credentials_.end() && it->second.app_id == rp_id_hash;
+        });
   } else {
     // 检查 resident keys
-    for (const auto& [cred_id, cred] : credentials_) {
-      if (cred.app_id == rp_id_hash) {
-        has_credential = true;
-        break;
-      }
-    }
+    has_credential = std::ranges::any_of(credentials_, [&](const auto& pair) {
+      return pair.second.app_id == rp_id_hash;
+    });
   }
 
   if (!has_credential) {
@@ -760,7 +748,7 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
 
   // 如果 allowList 没有匹配，搜索所有凭据 (resident key)
   if (!found_cred) {
-    for (auto& [cred_id, cred] : credentials_) {
+    for (auto&& [cred_id, cred] : credentials_) {
       if (cred.app_id == rp_id_hash) {
         found_cred = &cred;
         found_cred_id = cred_id;
@@ -790,25 +778,21 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
   std::vector<uint8_t> auth_data;
 
   // RP ID hash (32 bytes)
-  auth_data.insert(auth_data.end(), rp_id_hash.begin(), rp_id_hash.end());
+  auth_data.append_range(rp_id_hash);
 
   // Flags: UP=1, UV=1 (0x05)
   auth_data.push_back(0x05);
 
   // Counter (4 bytes, big-endian)
-  auth_data.push_back((counter >> 24) & 0xFF);
-  auth_data.push_back((counter >> 16) & 0xFF);
-  auth_data.push_back((counter >> 8) & 0xFF);
-  auth_data.push_back(counter & 0xFF);
+  write_be32(auth_data, counter);
 
   spdlog::debug("CTAP2: authData {} 字节, counter={}", auth_data.size(),
                 counter);
 
   // 签名数据 = authData || clientDataHash
   std::vector<uint8_t> sig_data;
-  sig_data.insert(sig_data.end(), auth_data.begin(), auth_data.end());
-  sig_data.insert(sig_data.end(), req.client_data_hash.begin(),
-                  req.client_data_hash.end());
+  sig_data.append_range(auth_data);
+  sig_data.append_range(req.client_data_hash);
 
   spdlog::debug("CTAP2: 签名数据 {} 字节 (authData {} + clientDataHash {})",
                 sig_data.size(), auth_data.size(), req.client_data_hash.size());
@@ -849,7 +833,7 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
   // 添加状态码
   std::vector<uint8_t> response;
   response.push_back(CTAP2_OK);
-  response.insert(response.end(), cbor_response.begin(), cbor_response.end());
+  response.append_range(cbor_response);
 
   spdlog::debug("CTAP2: GetAssertion 响应完成 ({} 字节)", response.size());
   return response;
@@ -866,7 +850,7 @@ void FIDO2Device::handle_wink(uint32_t channel_id) {
 void FIDO2Device::send_response(uint32_t channel_id, CTAPHIDCommand cmd,
                                 const std::vector<uint8_t>& data) {
   spdlog::debug("CTAPHID: 发送响应 CID={:#010X} CMD={:#04X} ({} 字节)",
-                channel_id, static_cast<int>(cmd), data.size());
+                channel_id, std::to_underlying(cmd), data.size());
 
   constexpr size_t INIT_DATA_SIZE = 57;  // 64 - 7
   constexpr size_t CONT_DATA_SIZE = 59;  // 64 - 5
@@ -874,24 +858,20 @@ void FIDO2Device::send_response(uint32_t channel_id, CTAPHIDCommand cmd,
   std::vector<uint8_t> packet(HID_REPORT_SIZE, 0);
 
   // Channel ID
-  packet[0] = (channel_id >> 24) & 0xFF;
-  packet[1] = (channel_id >> 16) & 0xFF;
-  packet[2] = (channel_id >> 8) & 0xFF;
-  packet[3] = channel_id & 0xFF;
+  write_be32_at(packet.data(), channel_id);
 
   // Command
-  packet[4] = static_cast<uint8_t>(cmd) | CTAPHID_INIT_PACKET_FLAG;
+  packet[4] = std::to_underlying(cmd) | CTAPHID_INIT_PACKET_FLAG;
 
   // Total length
   uint16_t total_len = static_cast<uint16_t>(data.size());
-  packet[5] = (total_len >> 8) & 0xFF;
-  packet[6] = total_len & 0xFF;
+  write_be16_at(packet.data() + 5, total_len);
 
   // Initial packet data
   size_t offset = 0;
   size_t copy_len = std::min(data.size(), INIT_DATA_SIZE);
   if (copy_len > 0) {
-    memcpy(packet.data() + 7, data.data(), copy_len);
+    std::copy_n(data.data(), copy_len, packet.data() + 7);
     offset = copy_len;
   }
 
@@ -902,14 +882,11 @@ void FIDO2Device::send_response(uint32_t channel_id, CTAPHIDCommand cmd,
   while (offset < data.size()) {
     std::fill(packet.begin(), packet.end(), 0);
 
-    packet[0] = (channel_id >> 24) & 0xFF;
-    packet[1] = (channel_id >> 16) & 0xFF;
-    packet[2] = (channel_id >> 8) & 0xFF;
-    packet[3] = channel_id & 0xFF;
+    write_be32_at(packet.data(), channel_id);
     packet[4] = seq++;
 
     copy_len = std::min(data.size() - offset, CONT_DATA_SIZE);
-    memcpy(packet.data() + 5, data.data() + offset, copy_len);
+    std::copy_n(data.data() + offset, copy_len, packet.data() + 5);
     offset += copy_len;
 
     uhid_.send_input(packet);
@@ -968,7 +945,7 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_register_response(
   // 简化实现：key_handle = random_prefix(16) || private_key(32)
   // 实际产品应该用设备密钥加密
   std::vector<uint8_t> key_handle = CryptoUtils::random_bytes(16);
-  key_handle.insert(key_handle.end(), private_key.begin(), private_key.end());
+  key_handle.append_range(private_key);
 
   // 保存凭据
   StoredCredential cred;
@@ -992,10 +969,10 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_register_response(
   // 构造签名数据: 00 || app_id || challenge || key_handle || public_key
   std::vector<uint8_t> sig_data;
   sig_data.push_back(0x00);
-  sig_data.insert(sig_data.end(), app_id.begin(), app_id.end());
-  sig_data.insert(sig_data.end(), challenge.begin(), challenge.end());
-  sig_data.insert(sig_data.end(), key_handle.begin(), key_handle.end());
-  sig_data.insert(sig_data.end(), public_key.begin(), public_key.end());
+  sig_data.append_range(app_id);
+  sig_data.append_range(challenge);
+  sig_data.append_range(key_handle);
+  sig_data.append_range(public_key);
 
   // 使用 attestation 密钥签名
   std::vector<uint8_t> signature = attestation_key_.sign(sig_data);
@@ -1011,12 +988,11 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_register_response(
   // || sig || 0x9000
   std::vector<uint8_t> response;
   response.push_back(0x05);  // Reserved byte
-  response.insert(response.end(), public_key.begin(), public_key.end());
+  response.append_range(public_key);
   response.push_back(static_cast<uint8_t>(key_handle.size()));
-  response.insert(response.end(), key_handle.begin(), key_handle.end());
-  response.insert(response.end(), attestation_cert_.begin(),
-                  attestation_cert_.end());
-  response.insert(response.end(), signature.begin(), signature.end());
+  response.append_range(key_handle);
+  response.append_range(attestation_cert_);
+  response.append_range(signature);
   response.push_back(0x90);  // SW_NO_ERROR
   response.push_back(0x00);
 
@@ -1079,13 +1055,10 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_auth_response(
 
             // 构造签名数据: app_id || user_presence || counter || challenge
             std::vector<uint8_t> sig_data;
-            sig_data.insert(sig_data.end(), app_id.begin(), app_id.end());
+            sig_data.append_range(app_id);
             sig_data.push_back(0x01);  // user presence = true
-            sig_data.push_back((counter >> 24) & 0xFF);
-            sig_data.push_back((counter >> 16) & 0xFF);
-            sig_data.push_back((counter >> 8) & 0xFF);
-            sig_data.push_back(counter & 0xFF);
-            sig_data.insert(sig_data.end(), challenge.begin(), challenge.end());
+            write_be32(sig_data, counter);
+            sig_data.append_range(challenge);
 
             std::vector<uint8_t> signature = user_key.sign(sig_data);
             if (signature.empty()) {
@@ -1096,11 +1069,8 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_auth_response(
             // 响应: user_presence(1) || counter(4) || signature || 0x9000
             std::vector<uint8_t> response;
             response.push_back(0x01);  // user presence
-            response.push_back((counter >> 24) & 0xFF);
-            response.push_back((counter >> 16) & 0xFF);
-            response.push_back((counter >> 8) & 0xFF);
-            response.push_back(counter & 0xFF);
-            response.insert(response.end(), signature.begin(), signature.end());
+            write_be32(response, counter);
+            response.append_range(signature);
             response.push_back(0x90);
             response.push_back(0x00);
 
@@ -1130,13 +1100,10 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_auth_response(
 
   // 构造签名数据: app_id || user_presence || counter || challenge
   std::vector<uint8_t> sig_data;
-  sig_data.insert(sig_data.end(), app_id.begin(), app_id.end());
+  sig_data.append_range(app_id);
   sig_data.push_back(0x01);  // user presence = true
-  sig_data.push_back((counter >> 24) & 0xFF);
-  sig_data.push_back((counter >> 16) & 0xFF);
-  sig_data.push_back((counter >> 8) & 0xFF);
-  sig_data.push_back(counter & 0xFF);
-  sig_data.insert(sig_data.end(), challenge.begin(), challenge.end());
+  write_be32(sig_data, counter);
+  sig_data.append_range(challenge);
 
   // 使用用户私钥签名
   std::vector<uint8_t> signature = user_key.sign(sig_data);
@@ -1148,11 +1115,8 @@ std::vector<uint8_t> FIDO2Device::generate_u2f_auth_response(
   // 响应: user_presence(1) || counter(4) || signature || 0x9000
   std::vector<uint8_t> response;
   response.push_back(0x01);  // user presence
-  response.push_back((counter >> 24) & 0xFF);
-  response.push_back((counter >> 16) & 0xFF);
-  response.push_back((counter >> 8) & 0xFF);
-  response.push_back(counter & 0xFF);
-  response.insert(response.end(), signature.begin(), signature.end());
+  write_be32(response, counter);
+  response.append_range(signature);
   response.push_back(0x90);
   response.push_back(0x00);
 
@@ -1167,7 +1131,7 @@ uint32_t FIDO2Device::allocate_channel_id() {
   std::lock_guard<std::mutex> lock(channels_mutex_);
   do {
     cid = dist(rng_);
-  } while (active_channels_.count(cid) > 0);
+  } while (active_channels_.contains(cid));
 
   return cid;
 }

@@ -1,14 +1,23 @@
 #pragma once
 
+#include <array>
+#include <concepts>
+#include <flat_map>
+#include <flat_set>
 #include <functional>
-#include <map>
 #include <mutex>
 #include <random>
+#include <span>
 
 #include "crypto.h"
 #include "uhid_device.h"
 
 namespace howdy {
+
+// FIDO2 AAGUID (唯一设备标识)
+inline constexpr std::array<uint8_t, 16> AAGUID = {'H', 'O', 'W', 'D', 'Y', 'F',
+                                                   'I', 'D', 'O', '2', 'D', 'E',
+                                                   'V', 'I', 'C', 'E'};
 
 // 外部验证回调类型：返回 true 表示验证成功
 using AuthHandler =
@@ -34,8 +43,13 @@ class FIDO2Device {
   bool is_running() const { return uhid_.is_running(); }
 
   // 设置外部验证回调（用于 D-Bus 模式）
-  void set_auth_handler(AuthHandler handler) {
-    auth_handler_ = std::move(handler);
+  template <typename F>
+    requires std::invocable<F, const std::string&, const std::string&> &&
+             std::convertible_to<std::invoke_result_t<F, const std::string&,
+                                                      const std::string&>,
+                                 bool>
+  void set_auth_handler(F&& handler) {
+    auth_handler_ = std::forward<F>(handler);
   }
 
   // 设置 PAM 服务名（用于内置 PAM 模式）
@@ -44,7 +58,7 @@ class FIDO2Device {
  private:
   // CTAPHID 协议处理
   void handle_ctaphid_message(const std::vector<uint8_t>& data);
-  void handle_init(uint32_t channel_id, const uint8_t* nonce);
+  void handle_init(uint32_t channel_id, std::span<const uint8_t, 8> nonce);
   void handle_ping(uint32_t channel_id, const std::vector<uint8_t>& data);
   void handle_cbor(uint32_t channel_id, const std::vector<uint8_t>& data);
   void handle_msg(uint32_t channel_id,
@@ -80,8 +94,8 @@ class FIDO2Device {
                                 const std::vector<uint8_t>& data);
 
   UHIDDevice uhid_;
-  std::map<uint32_t, bool> active_channels_;
-  std::map<uint32_t, PendingMessage> pending_messages_;
+  std::flat_set<uint32_t> active_channels_;
+  std::flat_map<uint32_t, PendingMessage> pending_messages_;
   std::mutex channels_mutex_;
   std::mt19937 rng_;
 
@@ -95,7 +109,7 @@ class FIDO2Device {
     std::string rp_id;                 // RP ID (原始字符串)
     uint32_t counter = 0;
   };
-  std::map<std::vector<uint8_t>, StoredCredential>
+  std::flat_map<std::vector<uint8_t>, StoredCredential>
       credentials_;  // credential_id -> credential
 
   // Attestation 密钥对 (用于签署注册响应)
@@ -108,8 +122,10 @@ class FIDO2Device {
 
   bool load_credentials_from_data(const std::vector<uint8_t>& data);
   std::vector<uint8_t> get_credentials_data();
-  void set_credentials_changed_callback(CredentialsChangedCallback cb) {
-    credentials_changed_cb_ = std::move(cb);
+  template <typename F>
+    requires std::invocable<F>
+  void set_credentials_changed_callback(F&& cb) {
+    credentials_changed_cb_ = std::forward<F>(cb);
   }
 
  private:

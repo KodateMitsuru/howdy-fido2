@@ -3,7 +3,7 @@
 #include <cbor.h>
 
 #include <cstdint>
-#include <map>
+#include <flat_map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,8 +15,8 @@ namespace howdy {
 // CBOR 值的简单包装
 class CborValue {
  public:
-  using Map = std::map<int, CborValue>;
-  using StringMap = std::map<std::string, CborValue>;
+  using Map = std::flat_map<int, CborValue>;
+  using StringMap = std::flat_map<std::string, CborValue>;
   using Array = std::vector<CborValue>;
   using Bytes = std::vector<uint8_t>;
   using Value = std::variant<std::monostate, bool, int64_t, uint64_t,
@@ -71,7 +71,7 @@ class CborEncoder {
       const std::vector<std::string>& versions,
       const std::vector<std::string>& extensions,
       const std::vector<uint8_t>& aaguid,
-      const std::map<std::string, bool>& options, uint32_t max_msg_size,
+      const std::flat_map<std::string, uint8_t>& options, uint32_t max_msg_size,
       const std::vector<int>& pin_protocols, int max_cred_count = 0,
       int max_cred_id_length = 0);
 
@@ -118,8 +118,8 @@ class CborDecoder {
     std::string user_display_name;
     std::vector<std::pair<std::string, int>> pub_key_cred_params;  // type, alg
     std::vector<std::vector<uint8_t>> exclude_list;
-    std::map<std::string, bool> options;
-    std::map<std::string, int> extensions;  // 扩展参数 (如 credProtect)
+    std::flat_map<std::string, uint8_t> options;
+    std::flat_map<std::string, int> extensions;  // 扩展参数 (如 credProtect)
     bool valid = false;
   };
 
@@ -131,7 +131,7 @@ class CborDecoder {
     std::string rp_id;
     std::vector<uint8_t> client_data_hash;
     std::vector<std::vector<uint8_t>> allow_list;
-    std::map<std::string, bool> options;
+    std::flat_map<std::string, uint8_t> options;
     bool valid = false;
   };
 

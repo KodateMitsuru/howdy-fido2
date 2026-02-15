@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <functional>
 #include <string>
 
@@ -23,8 +24,10 @@ class PAMAuthenticator {
   void set_timeout(int seconds) { timeout_seconds_ = seconds; }
 
   // 设置提示回调
-  void set_prompt_callback(PAMPromptCallback callback) {
-    prompt_callback_ = std::move(callback);
+  template <typename F>
+    requires std::invocable<F, const std::string&>
+  void set_prompt_callback(F&& callback) {
+    prompt_callback_ = std::forward<F>(callback);
   }
 
   // 获取最后的错误信息

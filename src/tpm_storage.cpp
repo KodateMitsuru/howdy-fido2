@@ -7,8 +7,18 @@
 #include <tss2/tss2_mu.h>
 
 #include <cstring>
+#include <memory>
+
+#include "byte_utils.h"
 
 namespace howdy {
+
+// OpenSSL RAII deleter for EVP_CIPHER_CTX (C++23 static operator())
+struct EVP_CIPHER_CTX_Deleter {
+  static void operator()(EVP_CIPHER_CTX* p) { EVP_CIPHER_CTX_free(p); }
+};
+using UniqueEVP_CIPHER_CTX =
+    std::unique_ptr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_Deleter>;
 
 // AES-GCM 参数
 static constexpr size_t AES_KEY_SIZE = 32;  // 256-bit
@@ -227,55 +237,41 @@ std::vector<uint8_t> CredentialSerializer::serialize(
 
   // 凭据数量
   uint32_t count = static_cast<uint32_t>(credentials.size());
-  result.push_back((count >> 24) & 0xFF);
-  result.push_back((count >> 16) & 0xFF);
-  result.push_back((count >> 8) & 0xFF);
-  result.push_back(count & 0xFF);
+  write_be32(result, count);
 
   for (const auto& cred : credentials) {
     // credential_id
     uint16_t len = static_cast<uint16_t>(cred.credential_id.size());
-    result.push_back((len >> 8) & 0xFF);
-    result.push_back(len & 0xFF);
-    result.insert(result.end(), cred.credential_id.begin(),
-                  cred.credential_id.end());
+    write_be16(result, len);
+    result.append_range(cred.credential_id);
 
     // private_key
     len = static_cast<uint16_t>(cred.private_key.size());
-    result.push_back((len >> 8) & 0xFF);
-    result.push_back(len & 0xFF);
-    result.insert(result.end(), cred.private_key.begin(),
-                  cred.private_key.end());
+    write_be16(result, len);
+    result.append_range(cred.private_key);
 
     // app_id
     len = static_cast<uint16_t>(cred.app_id.size());
-    result.push_back((len >> 8) & 0xFF);
-    result.push_back(len & 0xFF);
-    result.insert(result.end(), cred.app_id.begin(), cred.app_id.end());
+    write_be16(result, len);
+    result.append_range(cred.app_id);
 
     // user_id
     len = static_cast<uint16_t>(cred.user_id.size());
-    result.push_back((len >> 8) & 0xFF);
-    result.push_back(len & 0xFF);
-    result.insert(result.end(), cred.user_id.begin(), cred.user_id.end());
+    write_be16(result, len);
+    result.append_range(cred.user_id);
 
     // user_name
     len = static_cast<uint16_t>(cred.user_name.size());
-    result.push_back((len >> 8) & 0xFF);
-    result.push_back(len & 0xFF);
-    result.insert(result.end(), cred.user_name.begin(), cred.user_name.end());
+    write_be16(result, len);
+    result.append_range(cred.user_name);
 
     // rp_id
     len = static_cast<uint16_t>(cred.rp_id.size());
-    result.push_back((len >> 8) & 0xFF);
-    result.push_back(len & 0xFF);
-    result.insert(result.end(), cred.rp_id.begin(), cred.rp_id.end());
+    write_be16(result, len);
+    result.append_range(cred.rp_id);
 
     // counter
-    result.push_back((cred.counter >> 24) & 0xFF);
-    result.push_back((cred.counter >> 16) & 0xFF);
-    result.push_back((cred.counter >> 8) & 0xFF);
-    result.push_back(cred.counter & 0xFF);
+    write_be32(result, cred.counter);
   }
 
   return result;
@@ -299,16 +295,12 @@ std::vector<CredentialSerializer::Credential> CredentialSerializer::deserialize(
   }
 
   // 凭据数量
-  uint32_t count = (static_cast<uint32_t>(data[offset]) << 24) |
-                   (static_cast<uint32_t>(data[offset + 1]) << 16) |
-                   (static_cast<uint32_t>(data[offset + 2]) << 8) |
-                   static_cast<uint32_t>(data[offset + 3]);
+  uint32_t count = read_be32(data.data() + offset);
   offset += 4;
 
   auto read_bytes = [&](std::vector<uint8_t>& out) -> bool {
     if (offset + 2 > data.size()) return false;
-    uint16_t len = (static_cast<uint16_t>(data[offset]) << 8) |
-                   static_cast<uint16_t>(data[offset + 1]);
+    uint16_t len = read_be16(data.data() + offset);
     offset += 2;
     if (offset + len > data.size()) return false;
     out.assign(data.begin() + offset, data.begin() + offset + len);
@@ -318,8 +310,7 @@ std::vector<CredentialSerializer::Credential> CredentialSerializer::deserialize(
 
   auto read_string = [&](std::string& out) -> bool {
     if (offset + 2 > data.size()) return false;
-    uint16_t len = (static_cast<uint16_t>(data[offset]) << 8) |
-                   static_cast<uint16_t>(data[offset + 1]);
+    uint16_t len = read_be16(data.data() + offset);
     offset += 2;
     if (offset + len > data.size()) return false;
     out.assign(reinterpret_cast<const char*>(data.data() + offset), len);
@@ -338,10 +329,7 @@ std::vector<CredentialSerializer::Credential> CredentialSerializer::deserialize(
     if (!read_string(cred.rp_id)) break;
 
     if (offset + 4 > data.size()) break;
-    cred.counter = (static_cast<uint32_t>(data[offset]) << 24) |
-                   (static_cast<uint32_t>(data[offset + 1]) << 16) |
-                   (static_cast<uint32_t>(data[offset + 2]) << 8) |
-                   static_cast<uint32_t>(data[offset + 3]);
+    cred.counter = read_be32(data.data() + offset);
     offset += 4;
 
     result.push_back(std::move(cred));
@@ -390,7 +378,7 @@ std::vector<uint8_t> TPMStorage::seal_data(const std::vector<uint8_t>& data) {
   std::vector<uint8_t> ciphertext(data.size() + AES_GCM_TAG_SIZE);
   std::vector<uint8_t> tag(AES_GCM_TAG_SIZE);
 
-  EVP_CIPHER_CTX* evp_ctx = EVP_CIPHER_CTX_new();
+  UniqueEVP_CIPHER_CTX evp_ctx(EVP_CIPHER_CTX_new());
   if (!evp_ctx) {
     last_error_ = "创建加密上下文失败";
     return {};
@@ -400,26 +388,24 @@ std::vector<uint8_t> TPMStorage::seal_data(const std::vector<uint8_t>& data) {
   int ciphertext_len = 0;
 
   bool encrypt_ok =
-      EVP_EncryptInit_ex(evp_ctx, EVP_aes_256_gcm(), nullptr, nullptr,
+      EVP_EncryptInit_ex(evp_ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr,
                          nullptr) == 1 &&
-      EVP_EncryptInit_ex(evp_ctx, nullptr, nullptr, aes_key.data(),
+      EVP_EncryptInit_ex(evp_ctx.get(), nullptr, nullptr, aes_key.data(),
                          iv.data()) == 1 &&
-      EVP_EncryptUpdate(evp_ctx, ciphertext.data(), &len, data.data(),
+      EVP_EncryptUpdate(evp_ctx.get(), ciphertext.data(), &len, data.data(),
                         static_cast<int>(data.size())) == 1;
   ciphertext_len = len;
 
   if (encrypt_ok) {
     encrypt_ok =
-        EVP_EncryptFinal_ex(evp_ctx, ciphertext.data() + len, &len) == 1;
+        EVP_EncryptFinal_ex(evp_ctx.get(), ciphertext.data() + len, &len) == 1;
     ciphertext_len += len;
   }
 
   if (encrypt_ok) {
-    encrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx, EVP_CTRL_GCM_GET_TAG,
+    encrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx.get(), EVP_CTRL_GCM_GET_TAG,
                                      AES_GCM_TAG_SIZE, tag.data()) == 1;
   }
-
-  EVP_CIPHER_CTX_free(evp_ctx);
 
   if (!encrypt_ok) {
     last_error_ = "AES-GCM 加密失败";
@@ -576,7 +562,7 @@ std::vector<uint8_t> TPMStorage::unseal_data(
   // 用 AES-GCM 解密数据
   std::vector<uint8_t> plaintext(ciphertext.size());
 
-  EVP_CIPHER_CTX* evp_ctx = EVP_CIPHER_CTX_new();
+  UniqueEVP_CIPHER_CTX evp_ctx(EVP_CIPHER_CTX_new());
   if (!evp_ctx) {
     OPENSSL_cleanse(aes_key.data(), aes_key.size());
     last_error_ = "创建解密上下文失败";
@@ -586,27 +572,25 @@ std::vector<uint8_t> TPMStorage::unseal_data(
   int len = 0;
   int plaintext_len = 0;
 
-  bool decrypt_ok =
-      EVP_DecryptInit_ex(evp_ctx, EVP_aes_256_gcm(), nullptr, nullptr,
-                         nullptr) == 1 &&
-      EVP_DecryptInit_ex(evp_ctx, nullptr, nullptr, aes_key.data(),
-                         iv.data()) == 1 &&
-      EVP_DecryptUpdate(evp_ctx, plaintext.data(), &len, ciphertext.data(),
-                        static_cast<int>(ciphertext.size())) == 1;
+  bool decrypt_ok = EVP_DecryptInit_ex(evp_ctx.get(), EVP_aes_256_gcm(),
+                                       nullptr, nullptr, nullptr) == 1 &&
+                    EVP_DecryptInit_ex(evp_ctx.get(), nullptr, nullptr,
+                                       aes_key.data(), iv.data()) == 1 &&
+                    EVP_DecryptUpdate(evp_ctx.get(), plaintext.data(), &len,
+                                      ciphertext.data(),
+                                      static_cast<int>(ciphertext.size())) == 1;
   plaintext_len = len;
 
   if (decrypt_ok) {
-    decrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx, EVP_CTRL_GCM_SET_TAG,
+    decrypt_ok = EVP_CIPHER_CTX_ctrl(evp_ctx.get(), EVP_CTRL_GCM_SET_TAG,
                                      AES_GCM_TAG_SIZE, tag.data()) == 1;
   }
 
   if (decrypt_ok) {
     decrypt_ok =
-        EVP_DecryptFinal_ex(evp_ctx, plaintext.data() + len, &len) == 1;
+        EVP_DecryptFinal_ex(evp_ctx.get(), plaintext.data() + len, &len) == 1;
     plaintext_len += len;
   }
-
-  EVP_CIPHER_CTX_free(evp_ctx);
   OPENSSL_cleanse(aes_key.data(), aes_key.size());
 
   if (!decrypt_ok) {

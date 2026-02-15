@@ -16,8 +16,41 @@
 #include <spdlog/spdlog.h>
 
 #include <cstring>
+#include <memory>
 
 namespace howdy {
+
+// OpenSSL RAII deleters (C++23 static operator())
+struct EVP_PKEY_CTX_Deleter {
+  static void operator()(EVP_PKEY_CTX* p) { EVP_PKEY_CTX_free(p); }
+};
+struct EVP_MD_CTX_Deleter {
+  static void operator()(EVP_MD_CTX* p) { EVP_MD_CTX_free(p); }
+};
+struct BN_Deleter {
+  static void operator()(BIGNUM* p) { BN_free(p); }
+};
+struct EC_GROUP_Deleter {
+  static void operator()(EC_GROUP* p) { EC_GROUP_free(p); }
+};
+struct EC_POINT_Deleter {
+  static void operator()(EC_POINT* p) { EC_POINT_free(p); }
+};
+struct OSSL_PARAM_BLD_Deleter {
+  static void operator()(OSSL_PARAM_BLD* p) { OSSL_PARAM_BLD_free(p); }
+};
+struct OSSL_PARAM_Deleter {
+  static void operator()(OSSL_PARAM* p) { OSSL_PARAM_free(p); }
+};
+
+using UniqueEVP_PKEY_CTX = std::unique_ptr<EVP_PKEY_CTX, EVP_PKEY_CTX_Deleter>;
+using UniqueEVP_MD_CTX = std::unique_ptr<EVP_MD_CTX, EVP_MD_CTX_Deleter>;
+using UniqueBIGNUM = std::unique_ptr<BIGNUM, BN_Deleter>;
+using UniqueEC_GROUP = std::unique_ptr<EC_GROUP, EC_GROUP_Deleter>;
+using UniqueEC_POINT = std::unique_ptr<EC_POINT, EC_POINT_Deleter>;
+using UniqueOSSL_PARAM_BLD =
+    std::unique_ptr<OSSL_PARAM_BLD, OSSL_PARAM_BLD_Deleter>;
+using UniqueOSSL_PARAM = std::unique_ptr<OSSL_PARAM, OSSL_PARAM_Deleter>;
 
 ECKeyPair::ECKeyPair() = default;
 
@@ -49,31 +82,28 @@ bool ECKeyPair::generate() {
     pkey_ = nullptr;
   }
 
-  EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+  UniqueEVP_PKEY_CTX ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr));
   if (!ctx) {
     spdlog::error("Crypto: EVP_PKEY_CTX_new_id failed");
     return false;
   }
 
-  if (EVP_PKEY_keygen_init(ctx) <= 0) {
+  if (EVP_PKEY_keygen_init(ctx.get()) <= 0) {
     spdlog::error("Crypto: EVP_PKEY_keygen_init failed");
-    EVP_PKEY_CTX_free(ctx);
     return false;
   }
 
-  if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) <= 0) {
+  if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx.get(), NID_X9_62_prime256v1) <=
+      0) {
     spdlog::error("Crypto: EVP_PKEY_CTX_set_ec_paramgen_curve_nid failed");
-    EVP_PKEY_CTX_free(ctx);
     return false;
   }
 
-  if (EVP_PKEY_keygen(ctx, &pkey_) <= 0) {
+  if (EVP_PKEY_keygen(ctx.get(), &pkey_) <= 0) {
     spdlog::error("Crypto: EVP_PKEY_keygen failed");
-    EVP_PKEY_CTX_free(ctx);
     return false;
   }
 
-  EVP_PKEY_CTX_free(ctx);
   return true;
 }
 
@@ -103,13 +133,17 @@ std::vector<uint8_t> ECKeyPair::get_private_key() const {
   std::vector<uint8_t> result;
   if (!pkey_) return result;
 
-  BIGNUM* priv_bn = nullptr;
-  if (EVP_PKEY_get_bn_param(pkey_, OSSL_PKEY_PARAM_PRIV_KEY, &priv_bn) != 1) {
-    spdlog::error("Crypto: Failed to get private key");
-    return result;
+  UniqueBIGNUM priv_bn;
+  {
+    BIGNUM* raw = nullptr;
+    if (EVP_PKEY_get_bn_param(pkey_, OSSL_PKEY_PARAM_PRIV_KEY, &raw) != 1) {
+      spdlog::error("Crypto: Failed to get private key");
+      return result;
+    }
+    priv_bn.reset(raw);
   }
 
-  int bn_size = BN_num_bytes(priv_bn);
+  int bn_size = BN_num_bytes(priv_bn.get());
   result.resize(32);  // P-256 private key is 32 bytes
 
   // 填充到32字节
@@ -117,9 +151,8 @@ std::vector<uint8_t> ECKeyPair::get_private_key() const {
   if (offset > 0) {
     std::fill(result.begin(), result.begin() + offset, 0);
   }
-  BN_bn2bin(priv_bn, result.data() + offset);
+  BN_bn2bin(priv_bn.get(), result.data() + offset);
 
-  BN_free(priv_bn);
   return result;
 }
 
@@ -135,75 +168,64 @@ bool ECKeyPair::set_private_key(const std::vector<uint8_t>& private_key) {
   }
 
   // 从私钥创建 BIGNUM
-  BIGNUM* priv_bn = BN_bin2bn(private_key.data(), private_key.size(), nullptr);
+  UniqueBIGNUM priv_bn(
+      BN_bin2bn(private_key.data(), private_key.size(), nullptr));
   if (!priv_bn) {
     spdlog::error("Crypto: Failed to create BIGNUM from private key");
     return false;
   }
 
   // 获取 P-256 曲线参数
-  EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+  UniqueEC_GROUP group(EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1));
   if (!group) {
-    BN_free(priv_bn);
     return false;
   }
 
   // 计算公钥点
-  EC_POINT* pub_point = EC_POINT_new(group);
-  if (!pub_point ||
-      !EC_POINT_mul(group, pub_point, priv_bn, nullptr, nullptr, nullptr)) {
-    EC_POINT_free(pub_point);
-    EC_GROUP_free(group);
-    BN_free(priv_bn);
+  UniqueEC_POINT pub_point(EC_POINT_new(group.get()));
+  if (!pub_point || !EC_POINT_mul(group.get(), pub_point.get(), priv_bn.get(),
+                                  nullptr, nullptr, nullptr)) {
     return false;
   }
 
   // 获取公钥的未压缩格式
-  size_t pub_len = EC_POINT_point2oct(
-      group, pub_point, POINT_CONVERSION_UNCOMPRESSED, nullptr, 0, nullptr);
+  size_t pub_len =
+      EC_POINT_point2oct(group.get(), pub_point.get(),
+                         POINT_CONVERSION_UNCOMPRESSED, nullptr, 0, nullptr);
   std::vector<uint8_t> pub_key(pub_len);
-  EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_UNCOMPRESSED,
-                     pub_key.data(), pub_len, nullptr);
-
-  EC_POINT_free(pub_point);
-  EC_GROUP_free(group);
+  EC_POINT_point2oct(group.get(), pub_point.get(),
+                     POINT_CONVERSION_UNCOMPRESSED, pub_key.data(), pub_len,
+                     nullptr);
 
   // 使用 OpenSSL 3.x API 构建密钥
-  OSSL_PARAM_BLD* param_bld = OSSL_PARAM_BLD_new();
+  UniqueOSSL_PARAM_BLD param_bld(OSSL_PARAM_BLD_new());
   if (!param_bld) {
-    BN_free(priv_bn);
     return false;
   }
 
-  OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_PKEY_PARAM_GROUP_NAME,
+  OSSL_PARAM_BLD_push_utf8_string(param_bld.get(), OSSL_PKEY_PARAM_GROUP_NAME,
                                   "prime256v1", 0);
-  OSSL_PARAM_BLD_push_BN(param_bld, OSSL_PKEY_PARAM_PRIV_KEY, priv_bn);
-  OSSL_PARAM_BLD_push_octet_string(param_bld, OSSL_PKEY_PARAM_PUB_KEY,
+  OSSL_PARAM_BLD_push_BN(param_bld.get(), OSSL_PKEY_PARAM_PRIV_KEY,
+                         priv_bn.get());
+  OSSL_PARAM_BLD_push_octet_string(param_bld.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                    pub_key.data(), pub_key.size());
 
-  OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(param_bld);
-  OSSL_PARAM_BLD_free(param_bld);
-  BN_free(priv_bn);
-
+  UniqueOSSL_PARAM params(OSSL_PARAM_BLD_to_param(param_bld.get()));
   if (!params) {
     return false;
   }
 
-  EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+  UniqueEVP_PKEY_CTX ctx(EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr));
   if (!ctx) {
-    OSSL_PARAM_free(params);
     return false;
   }
 
-  if (EVP_PKEY_fromdata_init(ctx) <= 0 ||
-      EVP_PKEY_fromdata(ctx, &pkey_, EVP_PKEY_KEYPAIR, params) <= 0) {
-    EVP_PKEY_CTX_free(ctx);
-    OSSL_PARAM_free(params);
+  if (EVP_PKEY_fromdata_init(ctx.get()) <= 0 ||
+      EVP_PKEY_fromdata(ctx.get(), &pkey_, EVP_PKEY_KEYPAIR, params.get()) <=
+          0) {
     return false;
   }
 
-  EVP_PKEY_CTX_free(ctx);
-  OSSL_PARAM_free(params);
   return true;
 }
 
@@ -211,33 +233,29 @@ std::vector<uint8_t> ECKeyPair::sign(const std::vector<uint8_t>& data) const {
   std::vector<uint8_t> result;
   if (!pkey_) return result;
 
-  EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
+  UniqueEVP_MD_CTX md_ctx(EVP_MD_CTX_new());
   if (!md_ctx) return result;
 
-  if (EVP_DigestSignInit(md_ctx, nullptr, EVP_sha256(), nullptr, pkey_) <= 0) {
-    EVP_MD_CTX_free(md_ctx);
+  if (EVP_DigestSignInit(md_ctx.get(), nullptr, EVP_sha256(), nullptr, pkey_) <=
+      0) {
     return result;
   }
 
-  if (EVP_DigestSignUpdate(md_ctx, data.data(), data.size()) <= 0) {
-    EVP_MD_CTX_free(md_ctx);
+  if (EVP_DigestSignUpdate(md_ctx.get(), data.data(), data.size()) <= 0) {
     return result;
   }
 
   size_t sig_len = 0;
-  if (EVP_DigestSignFinal(md_ctx, nullptr, &sig_len) <= 0) {
-    EVP_MD_CTX_free(md_ctx);
+  if (EVP_DigestSignFinal(md_ctx.get(), nullptr, &sig_len) <= 0) {
     return result;
   }
 
   result.resize(sig_len);
-  if (EVP_DigestSignFinal(md_ctx, result.data(), &sig_len) <= 0) {
-    EVP_MD_CTX_free(md_ctx);
+  if (EVP_DigestSignFinal(md_ctx.get(), result.data(), &sig_len) <= 0) {
     return {};
   }
 
   result.resize(sig_len);
-  EVP_MD_CTX_free(md_ctx);
   return result;
 }
 
@@ -245,23 +263,20 @@ bool ECKeyPair::verify(const std::vector<uint8_t>& data,
                        const std::vector<uint8_t>& signature) const {
   if (!pkey_) return false;
 
-  EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
+  UniqueEVP_MD_CTX md_ctx(EVP_MD_CTX_new());
   if (!md_ctx) return false;
 
-  if (EVP_DigestVerifyInit(md_ctx, nullptr, EVP_sha256(), nullptr, pkey_) <=
-      0) {
-    EVP_MD_CTX_free(md_ctx);
+  if (EVP_DigestVerifyInit(md_ctx.get(), nullptr, EVP_sha256(), nullptr,
+                           pkey_) <= 0) {
     return false;
   }
 
-  if (EVP_DigestVerifyUpdate(md_ctx, data.data(), data.size()) <= 0) {
-    EVP_MD_CTX_free(md_ctx);
+  if (EVP_DigestVerifyUpdate(md_ctx.get(), data.data(), data.size()) <= 0) {
     return false;
   }
 
   int result =
-      EVP_DigestVerifyFinal(md_ctx, signature.data(), signature.size());
-  EVP_MD_CTX_free(md_ctx);
+      EVP_DigestVerifyFinal(md_ctx.get(), signature.data(), signature.size());
   return result == 1;
 }
 

@@ -6,12 +6,13 @@
 #include <spdlog/spdlog.h>
 #include <unistd.h>
 
+#include <array>
 #include <cstring>
 
 namespace howdy {
 
-// FIDO2 HID 报告描述符
-static const uint8_t FIDO2_REPORT_DESCRIPTOR[] = {
+// FIDO2 HID 报告描述符 (constexpr array)
+static constexpr auto FIDO2_REPORT_DESCRIPTOR = std::to_array<uint8_t>({
     0x06, 0xD0, 0xF1,  // Usage Page (FIDO Alliance)
     0x09, 0x01,        // Usage (CTAPHID)
     0xA1, 0x01,        // Collection (Application)
@@ -33,7 +34,7 @@ static const uint8_t FIDO2_REPORT_DESCRIPTOR[] = {
     0x91, 0x02,        //   Output (Data, Variable, Absolute)
 
     0xC0  // End Collection
-};
+});
 
 UHIDDevice::UHIDDevice(const std::string& name) : device_name_(name) {}
 
@@ -66,9 +67,9 @@ bool UHIDDevice::create() {
   ev.u.create2.country = 0;
 
   // 设置报告描述符
-  memcpy(ev.u.create2.rd_data, FIDO2_REPORT_DESCRIPTOR,
-         sizeof(FIDO2_REPORT_DESCRIPTOR));
-  ev.u.create2.rd_size = sizeof(FIDO2_REPORT_DESCRIPTOR);
+  memcpy(ev.u.create2.rd_data, FIDO2_REPORT_DESCRIPTOR.data(),
+         FIDO2_REPORT_DESCRIPTOR.size());
+  ev.u.create2.rd_size = FIDO2_REPORT_DESCRIPTOR.size();
 
   ssize_t ret = write(uhid_fd_, &ev, sizeof(ev));
   if (ret < 0) {

@@ -319,10 +319,9 @@ std::vector<uint8_t> DBusClient::unseal_data(
   } catch (const sdbus::Error& e) {
     std::string error_name = e.getName();
     // 检查是否是服务不可用的错误
-    if (error_name.find("ServiceUnknown") != std::string::npos ||
-        error_name.find("NoReply") != std::string::npos ||
-        error_name.find("Timeout") != std::string::npos ||
-        error_name.find("Disconnected") != std::string::npos) {
+    if (error_name.contains("ServiceUnknown") ||
+        error_name.contains("NoReply") || error_name.contains("Timeout") ||
+        error_name.contains("Disconnected")) {
       if (service_error) *service_error = true;
       spdlog::debug("D-Bus: UnsealData 服务未就绪 - {}", e.what());
     } else {
