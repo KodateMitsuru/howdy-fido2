@@ -90,6 +90,68 @@ target_link_libraries(howdy-fido2-passkey PRIVATE
 
 install(TARGETS howdy-fido2-daemon howdy-fido2-client howdy-fido2-passkey DESTINATION bin)
 
+# ── 测试 ───────────────────────────────────────────────────
+option(BUILD_TESTS "Build unit / integration tests" ON)
+
+if(BUILD_TESTS)
+  enable_testing()
+  find_package(GTest REQUIRED)
+  include(GoogleTest)
+
+  # 辅助宏：添加一个 test target
+  function(howdy_add_test)
+    cmake_parse_arguments(TEST "" "NAME" "SOURCES;LIBS" ${ARGN})
+    add_executable(${TEST_NAME} ${TEST_SOURCES})
+    target_link_libraries(${TEST_NAME} PRIVATE ${TEST_LIBS} GTest::gtest_main)
+    gtest_discover_tests(${TEST_NAME})
+  endfunction()
+
+  # Level 0 — 无特权
+  howdy_add_test(NAME test_byte_utils
+    SOURCES tests/test_byte_utils.cpp)
+
+  howdy_add_test(NAME test_credential_serializer
+    SOURCES tests/test_credential_serializer.cpp
+    LIBS howdy_fido2_core)
+
+  howdy_add_test(NAME test_crypto
+    SOURCES tests/test_crypto.cpp
+    LIBS howdy_fido2_core)
+
+  howdy_add_test(NAME test_cbor
+    SOURCES tests/test_cbor.cpp
+    LIBS howdy_fido2_core)
+
+  # Level 1 — TPM 访问
+  howdy_add_test(NAME test_tpm_storage
+    SOURCES tests/test_tpm_storage.cpp
+    LIBS howdy_fido2_core)
+
+  # Level 2 — PAM
+  howdy_add_test(NAME test_pam_auth
+    SOURCES tests/test_pam_auth.cpp
+    LIBS howdy_fido2_core)
+
+  # Level 3 — root (UHID)
+  howdy_add_test(NAME test_uhid_device
+    SOURCES tests/test_uhid_device.cpp
+    LIBS howdy_fido2_core pthread)
+
+  howdy_add_test(NAME test_fido2_device
+    SOURCES tests/test_fido2_device.cpp
+    LIBS howdy_fido2_core pthread)
+
+  # Level 2 — D-Bus 系统总线
+  howdy_add_test(NAME test_dbus
+    SOURCES tests/test_dbus.cpp
+    LIBS howdy_fido2_core howdy_fido2_dbus pthread)
+
+  # Level 4 — 全栈端到端
+  howdy_add_test(NAME test_e2e
+    SOURCES tests/test_e2e.cpp
+    LIBS howdy_fido2_core howdy_fido2_dbus pthread)
+endif()
+
 # 打印构建信息
 message(STATUS "Project: ${PROJECT_NAME} v${PROJECT_VERSION}")
 message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
