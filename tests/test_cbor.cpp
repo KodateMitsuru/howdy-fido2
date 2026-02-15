@@ -249,3 +249,184 @@ TEST(CborDecoder, ParseGetAssertion_GarbageData) {
   auto req = CborDecoder::parse_get_assertion(garbage);
   EXPECT_FALSE(req.valid);
 }
+
+// ── Unsigned Integer Encoding Tests ──────────────────────────
+TEST(CborEncoder, GetInfo_MaxMsgSize_MinimalEncoding) {
+  // 测试 maxMsgSize 使用最小字节数编码
+  std::vector<std::string> versions = {"FIDO_2_0"};
+  std::vector<uint8_t> aaguid(16, 0);
+  std::flat_map<std::string, uint8_t> options = {{"rk", true}};
+
+  // 测试各种 maxMsgSize 值
+  struct TestCase {
+    uint32_t max_msg_size;
+    const char* description;
+  };
+
+  std::vector<TestCase> cases = {
+      {23, "fits_in_tiny_int"},    // <= 23: 直接编码
+      {100, "uint8_range"},        // <= 0xFF: 1字节
+      {255, "max_uint8"},          // uint8最大值
+      {256, "min_uint16"},         // 需要2字节
+      {2048, "typical_value"},     // 常用值
+      {65535, "max_uint16"},       // uint16最大值
+      {65536, "min_uint32"},       // 需要4字节
+      {0xFFFFFFFF, "max_uint32"},  // uint32最大值
+  };
+
+  for (const auto& tc : cases) {
+    SCOPED_TRACE(std::string("maxMsgSize=") + std::to_string(tc.max_msg_size) +
+                 " (" + tc.description + ")");
+
+    auto encoded = CborEncoder::encode_get_info(versions, {}, aaguid, options,
+                                                tc.max_msg_size, {}, 0, 0);
+
+    ASSERT_FALSE(encoded.empty());
+
+    // 解析CBOR验证
+    struct cbor_load_result result;
+    cbor_item_t* item = cbor_load(encoded.data(), encoded.size(), &result);
+    ASSERT_NE(item, nullptr);
+    ASSERT_TRUE(cbor_isa_map(item));
+
+    // 查找键5 (maxMsgSize)
+    size_t map_size = cbor_map_size(item);
+    struct cbor_pair* pairs = cbor_map_handle(item);
+    bool found = false;
+
+    for (size_t i = 0; i < map_size; i++) {
+      if (cbor_isa_uint(pairs[i].key) && cbor_get_int(pairs[i].key) == 5) {
+        found = true;
+        cbor_item_t* value = pairs[i].value;
+        ASSERT_TRUE(cbor_isa_uint(value));
+        EXPECT_EQ(cbor_get_int(value), tc.max_msg_size);
+
+        // 验证使用了最小字节数编码
+        size_t value_size = cbor_serialized_size(value);
+        if (tc.max_msg_size <= 23) {
+          EXPECT_EQ(value_size, 1u) << "应使用tiny编码(1字节)";
+        } else if (tc.max_msg_size <= 0xFF) {
+          EXPECT_EQ(value_size, 2u) << "应使用uint8编码(2字节)";
+        } else if (tc.max_msg_size <= 0xFFFF) {
+          EXPECT_EQ(value_size, 3u) << "应使用uint16编码(3字节)";
+        } else {
+          EXPECT_EQ(value_size, 5u) << "应使用uint32编码(5字节)";
+        }
+        break;
+      }
+    }
+
+    EXPECT_TRUE(found) << "未找到键5 (maxMsgSize)";
+    cbor_decref(&item);
+  }
+}
+
+TEST(CborEncoder, GetInfo_MaxCredentialIdLength_MinimalEncoding) {
+  // 测试 maxCredentialIdLength 使用最小字节数编码
+  std::vector<std::string> versions = {"FIDO_2_0"};
+  std::vector<uint8_t> aaguid(16, 0);
+  std::flat_map<std::string, uint8_t> options = {{"rk", true}};
+
+  struct TestCase {
+    int max_cred_id_length;
+    const char* description;
+  };
+
+  std::vector<TestCase> cases = {
+      {16, "small_value"},   {64, "medium_value"}, {128, "typical_value"},
+      {255, "max_uint8"},    {256, "min_uint16"},  {1024, "large_value"},
+      {65535, "max_uint16"},
+  };
+
+  for (const auto& tc : cases) {
+    SCOPED_TRACE(std::string("maxCredentialIdLength=") +
+                 std::to_string(tc.max_cred_id_length) + " (" + tc.description +
+                 ")");
+
+    auto encoded = CborEncoder::encode_get_info(
+        versions, {}, aaguid, options, 2048, {}, 0, tc.max_cred_id_length);
+
+    ASSERT_FALSE(encoded.empty());
+
+    // 解析CBOR验证
+    struct cbor_load_result result;
+    cbor_item_t* item = cbor_load(encoded.data(), encoded.size(), &result);
+    ASSERT_NE(item, nullptr);
+    ASSERT_TRUE(cbor_isa_map(item));
+
+    // 查找键8 (maxCredentialIdLength)
+    size_t map_size = cbor_map_size(item);
+    struct cbor_pair* pairs = cbor_map_handle(item);
+    bool found = false;
+
+    for (size_t i = 0; i < map_size; i++) {
+      if (cbor_isa_uint(pairs[i].key) && cbor_get_int(pairs[i].key) == 8) {
+        found = true;
+        cbor_item_t* value = pairs[i].value;
+        ASSERT_TRUE(cbor_isa_uint(value));
+        EXPECT_EQ(cbor_get_int(value), tc.max_cred_id_length);
+
+        // 验证使用了最小字节数编码
+        size_t value_size = cbor_serialized_size(value);
+        if (tc.max_cred_id_length <= 23) {
+          EXPECT_EQ(value_size, 1u) << "应使用tiny编码(1字节)";
+        } else if (tc.max_cred_id_length <= 0xFF) {
+          EXPECT_EQ(value_size, 2u) << "应使用uint8编码(2字节)";
+        } else {
+          EXPECT_EQ(value_size, 3u) << "应使用uint16编码(3字节)";
+        }
+        break;
+      }
+    }
+
+    EXPECT_TRUE(found) << "未找到键8 (maxCredentialIdLength)";
+    cbor_decref(&item);
+  }
+}
+
+TEST(CborEncoder, GetInfo_IntegerEncodingConsistency) {
+  // 验证相同值在不同上下文中使用一致的编码
+  std::vector<std::string> versions = {"FIDO_2_0"};
+  std::vector<uint8_t> aaguid(16, 0);
+  std::flat_map<std::string, uint8_t> options = {{"rk", true}};
+
+  // 使用相同的值 (128) 作为两个参数
+  const uint32_t test_value = 128;
+  auto encoded =
+      CborEncoder::encode_get_info(versions, {}, aaguid, options,
+                                   test_value,  // maxMsgSize
+                                   {}, 0,
+                                   test_value  // maxCredentialIdLength
+      );
+
+  ASSERT_FALSE(encoded.empty());
+
+  // 解析并验证两个值都使用相同的编码大小
+  struct cbor_load_result result;
+  cbor_item_t* item = cbor_load(encoded.data(), encoded.size(), &result);
+  ASSERT_NE(item, nullptr);
+
+  size_t map_size = cbor_map_size(item);
+  struct cbor_pair* pairs = cbor_map_handle(item);
+
+  size_t size_key5 = 0, size_key8 = 0;
+
+  for (size_t i = 0; i < map_size; i++) {
+    if (!cbor_isa_uint(pairs[i].key)) continue;
+    int key = cbor_get_int(pairs[i].key);
+
+    if (key == 5) {  // maxMsgSize
+      size_key5 = cbor_serialized_size(pairs[i].value);
+      EXPECT_EQ(cbor_get_int(pairs[i].value), test_value);
+    } else if (key == 8) {  // maxCredentialIdLength
+      size_key8 = cbor_serialized_size(pairs[i].value);
+      EXPECT_EQ(cbor_get_int(pairs[i].value), test_value);
+    }
+  }
+
+  // 相同的值应该使用相同的编码大小
+  EXPECT_GT(size_key5, 0u);
+  EXPECT_EQ(size_key5, size_key8) << "相同值应使用一致的编码";
+
+  cbor_decref(&item);
+}

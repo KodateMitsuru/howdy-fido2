@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 #include <openssl/x509.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <vector>
 

@@ -4,7 +4,14 @@
 #include <string>
 #include <vector>
 
+#include "crypto.h"
+
+#define private public
+#define protected public
 #include "fido2_device.h"
+#undef private
+#undef protected
+
 #include "tpm_storage.h"
 
 using namespace howdy;
@@ -133,4 +140,121 @@ TEST_F(FIDO2DeviceTest, MultipleCredentials) {
   auto got = device.get_credentials_data();
   auto creds = CredentialSerializer::deserialize(got);
   EXPECT_EQ(creds.size(), 5u);
+}
+
+// ── GetAssertion Error Handling Tests ────────────────────────
+// 测试修复：GetAssertion应返回CTAP2_ERR_NO_CREDENTIALS而不是空响应
+
+class FIDO2DeviceErrorTest : public ::testing::Test {
+ protected:
+  FIDO2Device device;
+
+  void SetUp() override {
+    // 设置始终成功的auth handler
+    device.set_auth_handler(
+        [](const std::string&, const std::string&) -> bool { return true; });
+  }
+};
+
+TEST_F(FIDO2DeviceErrorTest, GetAssertion_NoCredentials_ReturnsErrorCode) {
+  // 确保设备没有凭据
+  device.load_credentials_from_data(CredentialSerializer::serialize({}));
+
+  // 构造一个有效的GetAssertion CBOR请求
+  // map(2) { 1: "example.com", 2: clientDataHash(32 bytes) }
+  std::vector<uint8_t> cbor_request;
+  cbor_request.push_back(0xA2);  // map(2)
+
+  // 键1: rpId
+  cbor_request.push_back(0x01);
+  cbor_request.push_back(0x6B);  // text(11) "example.com"
+  for (char c : std::string("example.com")) cbor_request.push_back(c);
+
+  // 键2: clientDataHash
+  cbor_request.push_back(0x02);
+  cbor_request.push_back(0x58);  // bytes(32)
+  cbor_request.push_back(32);
+  for (int i = 0; i < 32; i++) cbor_request.push_back(0xAA);
+
+  // 调用 handle_get_assertion
+  auto response = device.handle_get_assertion(cbor_request);
+
+  // 验证返回了错误码而不是空响应
+  ASSERT_FALSE(response.empty()) << "GetAssertion应返回错误码，不是空响应";
+  ASSERT_EQ(response.size(), 1u);
+
+  // CTAP2_ERR_NO_CREDENTIALS = 0x2E
+  constexpr uint8_t CTAP2_ERR_NO_CREDENTIALS = 0x2E;
+  EXPECT_EQ(response[0], CTAP2_ERR_NO_CREDENTIALS)
+      << "应返回CTAP2_ERR_NO_CREDENTIALS (0x2E)";
+}
+
+TEST_F(FIDO2DeviceErrorTest,
+       GetAssertion_NoMatchingCredentials_ReturnsNoCredentials) {
+  // 加载一个凭据，但RP ID不匹配
+  CredentialSerializer::Credential cred;
+  cred.credential_id = {0x01, 0x02, 0x03, 0x04};
+  cred.private_key.resize(32, 0xAA);
+
+  // 计算 "different.com" 的 SHA256 hash
+  std::string different_rp = "different.com";
+  std::vector<uint8_t> different_rp_bytes(different_rp.begin(),
+                                          different_rp.end());
+  cred.app_id = CryptoUtils::sha256(different_rp_bytes);
+
+  cred.user_id = {0x10};
+  cred.user_name = "test";
+  cred.rp_id = "different.com";
+  cred.counter = 1;
+
+  device.load_credentials_from_data(CredentialSerializer::serialize({cred}));
+
+  // 构造GetAssertion请求，请求 "example.com"（与存储的凭据不匹配）
+  std::vector<uint8_t> cbor_request;
+  cbor_request.push_back(0xA2);  // map(2)
+
+  // 键1: rpId = "example.com"
+  cbor_request.push_back(0x01);
+  cbor_request.push_back(0x6B);  // text(11)
+  for (char c : std::string("example.com")) cbor_request.push_back(c);
+
+  // 键2: clientDataHash
+  cbor_request.push_back(0x02);
+  cbor_request.push_back(0x58);  // bytes(32)
+  cbor_request.push_back(32);
+  for (int i = 0; i < 32; i++) cbor_request.push_back(0xBB);
+
+  auto response = device.handle_get_assertion(cbor_request);
+
+  // 应该返回NO_CREDENTIALS因为RP ID不匹配
+  ASSERT_FALSE(response.empty());
+  ASSERT_EQ(response.size(), 1u);
+
+  constexpr uint8_t CTAP2_ERR_NO_CREDENTIALS = 0x2E;
+  EXPECT_EQ(response[0], CTAP2_ERR_NO_CREDENTIALS);
+}
+
+TEST_F(FIDO2DeviceErrorTest, GetAssertion_InvalidCBOR_ReturnsError) {
+  // 测试无效的CBOR数据
+  std::vector<uint8_t> invalid_cbor = {0xFF, 0xFF, 0xFF};
+
+  auto response = device.handle_get_assertion(invalid_cbor);
+
+  // 应该返回INVALID_CBOR错误
+  ASSERT_FALSE(response.empty());
+  ASSERT_EQ(response.size(), 1u);
+
+  constexpr uint8_t CTAP2_ERR_INVALID_CBOR = 0x12;
+  EXPECT_EQ(response[0], CTAP2_ERR_INVALID_CBOR);
+}
+
+TEST_F(FIDO2DeviceErrorTest, GetAssertion_EmptyData_ReturnsError) {
+  // 测试空数据
+  std::vector<uint8_t> empty;
+
+  auto response = device.handle_get_assertion(empty);
+
+  // 应该返回错误码
+  ASSERT_FALSE(response.empty());
+  EXPECT_EQ(response.size(), 1u);
 }

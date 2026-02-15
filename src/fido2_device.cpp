@@ -279,26 +279,40 @@ void FIDO2Device::handle_cbor(uint32_t channel_id,
   uint8_t ctap_cmd = data[0];
   std::vector<uint8_t> cbor_data(data.begin() + 1, data.end());
 
-  spdlog::debug("CTAP2: 命令码 {:#04X}", ctap_cmd);
+  // 打印命令名称以便调试
+  const char* cmd_name = "UNKNOWN";
+  if (ctap_cmd == CTAP2_CMD_MAKE_CREDENTIAL)
+    cmd_name = "MakeCredential";
+  else if (ctap_cmd == CTAP2_CMD_GET_ASSERTION)
+    cmd_name = "GetAssertion";
+  else if (ctap_cmd == CTAP2_CMD_GET_INFO)
+    cmd_name = "GetInfo";
+  else if (ctap_cmd == CTAP2_CMD_CLIENT_PIN)
+    cmd_name = "ClientPIN";
+  else if (ctap_cmd == CTAP2_CMD_RESET)
+    cmd_name = "Reset";
+
+  spdlog::info("CTAP2: >>> 收到 {} 命令 (0x{:02X}), CBOR数据 {} 字节", cmd_name,
+               ctap_cmd, cbor_data.size());
 
   std::vector<uint8_t> response;
 
   switch (ctap_cmd) {
     case CTAP2_CMD_GET_INFO:
+      spdlog::debug("CTAP2: 处理 GetInfo");
       response = handle_get_info();
       break;
 
     case CTAP2_CMD_MAKE_CREDENTIAL:
+      spdlog::info("CTAP2: ========================================");
+      spdlog::info("CTAP2: 开始处理 MakeCredential (注册新凭据)");
+      spdlog::info("CTAP2: ========================================");
       response = handle_make_credential(cbor_data);
       break;
 
     case CTAP2_CMD_GET_ASSERTION:
+      spdlog::debug("CTAP2: 处理 GetAssertion");
       response = handle_get_assertion(cbor_data);
-      // 如果返回空响应，表示没有凭据，静默不响应让其他设备处理
-      if (response.empty()) {
-        spdlog::debug("CTAP2: 静默模式 - 不发送响应");
-        return;
-      }
       break;
 
     case CTAP2_CMD_CLIENT_PIN:
@@ -312,11 +326,13 @@ void FIDO2Device::handle_cbor(uint32_t channel_id,
       break;
 
     default:
-      spdlog::warn("CTAP2: 不支持的命令");
+      spdlog::warn("CTAP2: 不支持的命令 0x{:02X}", ctap_cmd);
       response = {CTAP1_ERR_INVALID_COMMAND};
       break;
   }
 
+  spdlog::info("CTAP2: <<< 发送响应 {} 字节 (状态码: 0x{:02X})",
+               response.size(), response.empty() ? 0xFF : response[0]);
   send_response(channel_id, CTAPHIDCommand::CBOR, response);
 }
 
@@ -519,29 +535,32 @@ bool FIDO2Device::verify_user(const std::string& operation) {
 
 std::vector<uint8_t> FIDO2Device::handle_make_credential(
     const std::vector<uint8_t>& cbor_data) {
-  spdlog::debug("CTAP2: 处理 authenticatorMakeCredential (使用 libcbor)");
-  spdlog::debug("CTAP2: CBOR 数据 {} 字节", cbor_data.size());
+  spdlog::info("CTAP2: [MakeCredential] 步骤1: 解析CBOR请求");
 
   // 解析 CBOR 请求
   auto req = CborDecoder::parse_make_credential(cbor_data);
   if (!req.valid) {
-    spdlog::error("CTAP2: 无法解析 MakeCredential 请求");
+    spdlog::error("CTAP2: [MakeCredential] ❌ 无法解析CBOR请求");
     return {CTAP2_ERR_INVALID_CBOR};
   }
 
-  spdlog::debug("CTAP2: RP ID = {}", req.rp_id);
-  spdlog::debug("CTAP2: User = {} ({})", req.user_name, req.user_display_name);
+  spdlog::info("CTAP2: [MakeCredential] RP ID = {}", req.rp_id);
+  spdlog::info("CTAP2: [MakeCredential] User = {} ({})", req.user_name,
+               req.user_display_name);
+  spdlog::info("CTAP2: [MakeCredential] Extensions: {}", req.extensions.size());
 
   // 设置当前 RP ID（用于 D-Bus 模式）
   current_rp_id_ = req.rp_id;
 
   // 使用 PAM 验证用户
+  spdlog::info("CTAP2: [MakeCredential] 步骤2: 请求用户验证...");
   if (!verify_user("创建 FIDO2 凭证")) {
-    spdlog::warn("CTAP2: ❌ 用户验证失败，拒绝创建凭证");
+    spdlog::warn("CTAP2: [MakeCredential] ❌ 用户验证失败，拒绝创建凭证");
     return {CTAP2_ERR_OPERATION_DENIED};
   }
 
-  spdlog::info("CTAP2: ✅ 用户验证通过，创建凭证");
+  spdlog::info("CTAP2: [MakeCredential] ✅ 用户验证通过");
+  spdlog::info("CTAP2: [MakeCredential] 步骤3: 生成密钥对...");
 
   // 计算 RP ID hash
   std::vector<uint8_t> rp_id_bytes(req.rp_id.begin(), req.rp_id.end());
@@ -550,14 +569,16 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   // 生成新的用户密钥对
   ECKeyPair user_key;
   if (!user_key.generate()) {
-    spdlog::error("CTAP2: 无法生成用户密钥对");
+    spdlog::error("CTAP2: [MakeCredential] ❌ 无法生成用户密钥对");
     return {CTAP2_ERR_UNHANDLED_REQUEST};
   }
 
   std::vector<uint8_t> public_key = user_key.get_public_key();
   std::vector<uint8_t> private_key = user_key.get_private_key();
 
-  spdlog::debug("CTAP2: 生成用户密钥对，公钥 {} 字节", public_key.size());
+  spdlog::info("CTAP2: [MakeCredential] ✅ 密钥对已生成 (公钥 {} 字节)",
+               public_key.size());
+  spdlog::info("CTAP2: [MakeCredential] 步骤4: 保存凭据...");
 
   // 生成凭证 ID (包含加密的私钥信息)
   std::vector<uint8_t> credential_id = CryptoUtils::random_bytes(16);
@@ -577,8 +598,9 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   // 通知客户端凭据已变更
   notify_credentials_changed();
 
-  spdlog::debug("CTAP2: 凭据已保存，credential_id {} 字节",
-                credential_id.size());
+  spdlog::info("CTAP2: [MakeCredential] ✅ 凭据已保存 (ID: {} 字节)",
+               credential_id.size());
+  spdlog::info("CTAP2: [MakeCredential] 步骤5: 生成attestation响应...");
 
   // 检查是否有扩展请求
   bool has_extensions = !req.extensions.empty();
@@ -671,7 +693,12 @@ std::vector<uint8_t> FIDO2Device::handle_make_credential(
   response.push_back(0x03);
   response.push_back(0xA0);  // map(0)
 
-  spdlog::debug("CTAP2: MakeCredential 响应完成 ({} 字节)", response.size());
+  spdlog::info(
+      "CTAP2: [MakeCredential] ========================================");
+  spdlog::info("CTAP2: [MakeCredential] ✅ 注册成功！响应 {} 字节",
+               response.size());
+  spdlog::info(
+      "CTAP2: [MakeCredential] ========================================");
   return response;
 }
 
@@ -711,11 +738,11 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
   }
 
   if (!has_credential) {
-    spdlog::info("CTAP2: 没有匹配凭据 (rp_id={})，静默让其他设备处理",
+    spdlog::info("CTAP2: 没有匹配凭据 (rp_id={})，返回 NO_CREDENTIALS 错误",
                  req.rp_id);
-    // 返回空响应，让 CTAPHID 层不发送响应
-    // 这样浏览器会继续等待其他设备
-    return {};
+    // 返回 NO_CREDENTIALS 错误，告诉浏览器此设备没有匹配的凭据
+    // 这样浏览器可以继续尝试注册流程（MakeCredential）
+    return {CTAP2_ERR_NO_CREDENTIALS};
   }
 
   // 设置当前 RP ID（用于 D-Bus 模式）

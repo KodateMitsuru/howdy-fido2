@@ -1,6 +1,6 @@
 _pkgname=howdy-fido2
 pkgname=$_pkgname-git
-pkgver=0.1.1.r4.gc43333c
+pkgver=0.1.1.r7.g5a4a24c
 pkgrel=1
 pkgdesc="Howdy FIDO2 Extension"
 arch=('x86_64')

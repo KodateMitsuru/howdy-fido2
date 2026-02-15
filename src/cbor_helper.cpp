@@ -102,8 +102,16 @@ std::vector<uint8_t> CborEncoder::encode_get_info(
     items.emplace_back(4, build_sorted_string_map(opt_items));
   }
 
-  // 5: maxMsgSize
-  items.emplace_back(5, cbor_build_uint32(max_msg_size));
+  // 5: maxMsgSize - 使用最小字节数编码
+  if (max_msg_size <= 23) {
+    items.emplace_back(5, cbor_build_uint8(max_msg_size));
+  } else if (max_msg_size <= 0xFF) {
+    items.emplace_back(5, cbor_build_uint8(max_msg_size));
+  } else if (max_msg_size <= 0xFFFF) {
+    items.emplace_back(5, cbor_build_uint16(max_msg_size));
+  } else {
+    items.emplace_back(5, cbor_build_uint32(max_msg_size));
+  }
 
   // 6: pinUvAuthProtocols (if not empty)
   if (!pin_protocols.empty()) {
@@ -121,9 +129,13 @@ std::vector<uint8_t> CborEncoder::encode_get_info(
     items.emplace_back(7, cbor_build_uint8(max_cred_count));
   }
 
-  // 8: maxCredentialIdLength
+  // 8: maxCredentialIdLength - 使用最小字节数编码
   if (max_cred_id_length > 0) {
-    items.emplace_back(8, cbor_build_uint16(max_cred_id_length));
+    if (max_cred_id_length <= 0xFF) {
+      items.emplace_back(8, cbor_build_uint8(max_cred_id_length));
+    } else {
+      items.emplace_back(8, cbor_build_uint16(max_cred_id_length));
+    }
   }
 
   // 10: algorithms - 按键规范顺序 ("alg" < "type")
