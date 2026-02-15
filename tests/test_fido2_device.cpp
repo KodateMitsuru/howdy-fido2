@@ -87,29 +87,6 @@ TEST_F(FIDO2DeviceTest, CredentialsRoundtrip) {
   EXPECT_EQ(creds[0].counter, cred.counter);
 }
 
-// ── 凭据变更回调 ─────────────────────────────────────────────
-// load_credentials_from_data() 不触发 credentials_changed 回调
-// （回调仅在 CTAP MakeCredential / U2F Register 等协议操作时触发）
-// 此测试验证回调可以正确设置而不崩溃
-TEST_F(FIDO2DeviceTest, CredentialsChangedCallback_SetNoThrow) {
-  bool callback_fired = false;
-  device.set_credentials_changed_callback([&]() { callback_fired = true; });
-
-  CredentialSerializer::Credential cred;
-  cred.credential_id = {0x05, 0x06};
-  cred.private_key.resize(32, 0xCC);
-  cred.app_id.resize(32, 0xDD);
-  cred.user_id = {0x30};
-  cred.user_name = "cb_user";
-  cred.rp_id = "callback.test";
-  cred.counter = 0;
-
-  auto data = CredentialSerializer::serialize({cred});
-  EXPECT_TRUE(device.load_credentials_from_data(data));
-  // load_credentials_from_data 不触发回调 — 这是正确的设计
-  EXPECT_FALSE(callback_fired);
-}
-
 // ── 空数据加载 ───────────────────────────────────────────────
 TEST_F(FIDO2DeviceTest, EmptyCredentialsLoad) {
   auto empty_serialized = CredentialSerializer::serialize({});
@@ -257,4 +234,81 @@ TEST_F(FIDO2DeviceErrorTest, GetAssertion_EmptyData_ReturnsError) {
   // 应该返回错误码
   ASSERT_FALSE(response.empty());
   EXPECT_EQ(response.size(), 1u);
+}
+
+// ── 凭据变更回调测试 ──────────────────────────────────────────
+TEST_F(FIDO2DeviceErrorTest,
+       CredentialsChangedCallback_TriggeredByMakeCredential) {
+  // 测试 handle_make_credential 会触发 credentials_changed 回调
+  bool callback_fired = false;
+  device.set_credentials_changed_callback([&]() { callback_fired = true; });
+
+  // 构造一个有效的MakeCredential CBOR请求
+  // map { 1: clientDataHash, 2: {id: "test.com"}, 3: {id: bytes, name: "user"}
+  // }
+  std::vector<uint8_t> cbor_request;
+  cbor_request.push_back(0xA3);  // map(3)
+
+  // 键1: clientDataHash (32 bytes)
+  cbor_request.push_back(0x01);
+  cbor_request.push_back(0x58);  // bytes(32)
+  cbor_request.push_back(32);
+  for (int i = 0; i < 32; i++) cbor_request.push_back(0xAA);
+
+  // 键2: rp {id: "test.com"}
+  cbor_request.push_back(0x02);
+  cbor_request.push_back(0xA1);  // map(1)
+  cbor_request.push_back(0x62);  // text(2) "id"
+  cbor_request.push_back('i');
+  cbor_request.push_back('d');
+  cbor_request.push_back(0x68);  // text(8) "test.com"
+  for (char c : std::string("test.com")) cbor_request.push_back(c);
+
+  // 键3: user {id: bytes(4), name: "testuser"}
+  cbor_request.push_back(0x03);
+  cbor_request.push_back(0xA2);  // map(2)
+  cbor_request.push_back(0x62);  // text(2) "id"
+  cbor_request.push_back('i');
+  cbor_request.push_back('d');
+  cbor_request.push_back(0x44);  // bytes(4)
+  cbor_request.push_back(0x01);
+  cbor_request.push_back(0x02);
+  cbor_request.push_back(0x03);
+  cbor_request.push_back(0x04);
+  cbor_request.push_back(0x64);  // text(4) "name"
+  for (char c : std::string("name")) cbor_request.push_back(c);
+  cbor_request.push_back(0x68);  // text(8) "testuser"
+  for (char c : std::string("testuser")) cbor_request.push_back(c);
+
+  // 调用 handle_make_credential
+  auto response = device.handle_make_credential(cbor_request);
+
+  // 验证回调被触发
+  EXPECT_TRUE(callback_fired)
+      << "MakeCredential应该触发credentials_changed回调";
+
+  // 验证响应成功
+  ASSERT_FALSE(response.empty());
+  EXPECT_EQ(response[0], 0x00) << "应该返回CTAP2_OK";
+}
+
+TEST_F(FIDO2DeviceErrorTest, CredentialsChangedCallback_NotTriggeredByLoad) {
+  // 测试 load_credentials_from_data 不触发回调（这是正确的设计）
+  bool callback_fired = false;
+  device.set_credentials_changed_callback([&]() { callback_fired = true; });
+
+  CredentialSerializer::Credential cred;
+  cred.credential_id = {0x05, 0x06};
+  cred.private_key.resize(32, 0xCC);
+  cred.app_id.resize(32, 0xDD);
+  cred.user_id = {0x30};
+  cred.user_name = "cb_user";
+  cred.rp_id = "callback.test";
+  cred.counter = 0;
+
+  auto data = CredentialSerializer::serialize({cred});
+  EXPECT_TRUE(device.load_credentials_from_data(data));
+
+  // load_credentials_from_data 不应该触发回调
+  EXPECT_FALSE(callback_fired) << "load_credentials_from_data不应触发回调";
 }
