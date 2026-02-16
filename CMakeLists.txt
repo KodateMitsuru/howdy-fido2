@@ -1,27 +1,22 @@
-cmake_minimum_required(VERSION 3.16)
-project(howdy-fido2 VERSION 0.1.0)
+cmake_minimum_required(VERSION 4.0)
+project(howdy-fido2 VERSION 0.1.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 查找依赖库
-find_library(PAM_LIBRARY pam REQUIRED)
-find_path(PAM_INCLUDE_DIR security/pam_appl.h REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_library(CBOR_LIBRARY cbor REQUIRED)
-find_path(CBOR_INCLUDE_DIR cbor.h REQUIRED)
+find_package(libcbor REQUIRED)
+find_package(sdbus-c++ REQUIRED)
 find_package(spdlog REQUIRED)
+find_package(argparse REQUIRED)
 
-# TPM2 库
+
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(TSS2 REQUIRED tss2-esys tss2-mu)
-
-# sdbus-c++ 库 (D-Bus IPC)
-pkg_check_modules(SDBUS REQUIRED sdbus-c++)
-
-# libfido2 库 (FIDO2 设备检测)
-pkg_check_modules(LIBFIDO2 REQUIRED libfido2)
+pkg_check_modules(PAM REQUIRED IMPORTED_TARGET pam)
+pkg_check_modules(TSS2 REQUIRED IMPORTED_TARGET tss2-esys tss2-mu)
+pkg_check_modules(LIBFIDO2 REQUIRED IMPORTED_TARGET libfido2)
 
 # 核心库源文件（不含 main）
 set(CORE_SOURCES
@@ -40,27 +35,18 @@ set(DBUS_SOURCES
     src/dbus_interface.cpp
 )
 
-# 头文件目录
-include_directories(
-    include 
-    ${PAM_INCLUDE_DIR} 
-    ${CBOR_INCLUDE_DIR} 
-    ${TSS2_INCLUDE_DIRS}
-    ${SDBUS_INCLUDE_DIRS}
-    ${LIBFIDO2_INCLUDE_DIRS}
-)
-
 # 创建核心库
 add_library(howdy_fido2_core STATIC ${CORE_SOURCES})
 target_include_directories(howdy_fido2_core PUBLIC include)
 target_link_libraries(howdy_fido2_core PUBLIC 
-    ${PAM_LIBRARY} 
-    ${CBOR_LIBRARY} 
+    libcbor::libcbor
+    SDBusCpp::sdbus-c++
     OpenSSL::SSL 
     OpenSSL::Crypto 
     spdlog::spdlog
-    ${LIBFIDO2_LIBRARIES}
-    ${TSS2_LIBRARIES}
+    PkgConfig::PAM
+    PkgConfig::LIBFIDO2
+    PkgConfig::TSS2
 )
 
 # 创建 D-Bus 库
@@ -68,14 +54,15 @@ add_library(howdy_fido2_dbus STATIC ${DBUS_SOURCES})
 target_include_directories(howdy_fido2_dbus PUBLIC include)
 target_link_libraries(howdy_fido2_dbus PUBLIC 
     spdlog::spdlog
-    ${SDBUS_LIBRARIES}
+    SDBusCpp::sdbus-c++
 )
 
 # 守护进程（高权限：UHID + TPM）
 add_executable(howdy-fido2-daemon src/daemon_main.cpp)
 target_link_libraries(howdy-fido2-daemon PRIVATE 
     howdy_fido2_core 
-    howdy_fido2_dbus 
+    howdy_fido2_dbus
+    argparse::argparse
     pthread
 )
 
@@ -84,18 +71,20 @@ add_executable(howdy-fido2-client src/client_main.cpp)
 target_link_libraries(howdy-fido2-client PRIVATE 
     howdy_fido2_core
     howdy_fido2_dbus
+    argparse::argparse
     pthread
 )
 
-# Passkey 管理工具
-add_executable(howdy-fido2-passkey src/passkey_tool.cpp)
-target_link_libraries(howdy-fido2-passkey PRIVATE 
+# 管理工具
+add_executable(howdy-fido2 src/passkey_tool.cpp)
+target_link_libraries(howdy-fido2 PRIVATE 
     howdy_fido2_core
     howdy_fido2_dbus
+    argparse::argparse
     pthread
 )
 
-install(TARGETS howdy-fido2-daemon howdy-fido2-client howdy-fido2-passkey DESTINATION bin)
+install(TARGETS howdy-fido2-daemon howdy-fido2-client howdy-fido2 DESTINATION bin)
 
 # ── 测试 ───────────────────────────────────────────────────
 option(BUILD_TESTS "Build unit / integration tests" ON)
@@ -110,6 +99,7 @@ if(BUILD_TESTS)
     cmake_parse_arguments(TEST "" "NAME" "SOURCES;LIBS" ${ARGN})
     add_executable(${TEST_NAME} ${TEST_SOURCES})
     target_link_libraries(${TEST_NAME} PRIVATE ${TEST_LIBS} GTest::gtest_main spdlog::spdlog)
+    target_include_directories(${TEST_NAME} PRIVATE include)
     gtest_discover_tests(${TEST_NAME})
   endfunction()
 

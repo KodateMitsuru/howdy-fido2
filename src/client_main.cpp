@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <argparse/argparse.hpp>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -30,18 +31,6 @@ std::atomic<bool> g_running{true};
 void signal_handler(int signum) {
   spdlog::info("收到信号 {}，正在退出...", signum);
   g_running.store(false);
-}
-
-void print_usage(const char* program) {
-  std::print(
-      "用法: {} [选项]\n\n"
-      "选项:\n"
-      "  -s, --service NAME  PAM 服务名 (默认: howdy-fido2)\n"
-      "  -D, --debug         启用调试输出\n"
-      "  -h, --help          显示此帮助信息\n\n"
-      "用户客户端，负责 PAM 验证和凭据管理。\n"
-      "以普通用户权限运行，通过 D-Bus 与守护进程通信。\n",
-      program);
 }
 
 // 用户验证状态缓存
@@ -140,29 +129,31 @@ class CredentialsFile {
 };
 
 int main(int argc, char* argv[]) {
-  bool debug = false;
-  std::string pam_service = "howdy-fido2";
+  argparse::ArgumentParser program("howdy-fido2-client");
+  program.add_description(
+      "用户客户端，负责 PAM 验证和凭据管理。\n"
+      "以普通用户权限运行，通过 D-Bus 与守护进程通信。");
 
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "-h" || arg == "--help") {
-      print_usage(argv[0]);
-      return 0;
-    } else if (arg == "-s" || arg == "--service") {
-      if (i + 1 < argc) {
-        pam_service = argv[++i];
-      } else {
-        spdlog::error("--service 需要参数");
-        return 1;
-      }
-    } else if (arg == "-D" || arg == "--debug") {
-      debug = true;
-    } else {
-      spdlog::error("未知选项: {}", arg);
-      print_usage(argv[0]);
-      return 1;
-    }
+  program.add_argument("-s", "--service")
+      .help("PAM 服务名")
+      .default_value(std::string("howdy-fido2"))
+      .metavar("NAME");
+
+  program.add_argument("-D", "--debug")
+      .help("启用调试输出")
+      .default_value(false)
+      .implicit_value(true);
+
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::exception& err) {
+    std::print(stderr, "错误: {}\n", err.what());
+    std::print(stderr, "\n{}", program.help().str());
+    return 1;
   }
+
+  bool debug = program.get<bool>("--debug");
+  std::string pam_service = program.get<std::string>("--service");
 
   spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
   spdlog::set_level(debug ? spdlog::level::debug : spdlog::level::info);

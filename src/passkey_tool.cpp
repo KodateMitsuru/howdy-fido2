@@ -8,7 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <charconv>
+#include <argparse/argparse.hpp>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -79,27 +79,6 @@ std::string to_hex(const std::vector<uint8_t>& data, size_t max_len = 0) {
     result += "...";
   }
   return result;
-}
-
-void print_usage(const char* program) {
-  std::print(
-      "用法: {} <命令> [选项]\n\n"
-      "命令:\n"
-      "  list              列出所有存储的 passkey\n"
-      "  show <index>      显示指定 passkey 的详细信息\n"
-      "  delete <index>    删除指定的 passkey\n"
-      "  clear             清除所有 passkey（需确认）\n"
-      "  info              显示存储信息\n"
-      "\n"
-      "选项:\n"
-      "  -y, --yes         跳过确认提示\n"
-      "  -h, --help        显示此帮助信息\n"
-      "\n"
-      "示例:\n"
-      "  {} list                列出所有 passkey\n"
-      "  {} show 1              显示第 1 个 passkey 的详情\n"
-      "  {} delete 2            删除第 2 个 passkey\n",
-      program, program, program, program);
 }
 
 int cmd_info() {
@@ -309,31 +288,55 @@ int cmd_clear(howdy::DBusClient& client, bool skip_confirm) {
 int main(int argc, char* argv[]) {
   spdlog::set_level(spdlog::level::off);
 
-  if (argc < 2) {
-    print_usage(argv[0]);
+  argparse::ArgumentParser program("howdy-fido2");
+  program.add_description("用于管理本地存储的 FIDO2 凭据");
+
+  // 全局选项
+  program.add_argument("-y", "--yes")
+      .help("跳过确认提示")
+      .default_value(false)
+      .implicit_value(true);
+
+  // 子命令
+  argparse::ArgumentParser list_cmd("list");
+  list_cmd.add_description("列出所有存储的 passkey");
+
+  argparse::ArgumentParser show_cmd("show");
+  show_cmd.add_description("显示指定 passkey 的详细信息");
+  show_cmd.add_argument("index").help("passkey 序号").scan<'i', int>();
+
+  argparse::ArgumentParser delete_cmd("delete");
+  delete_cmd.add_description("删除指定的 passkey");
+  delete_cmd.add_argument("index")
+      .help("要删除的 passkey 序号")
+      .scan<'i', int>();
+
+  argparse::ArgumentParser clear_cmd("clear");
+  clear_cmd.add_description("清除所有 passkey（需确认）");
+
+  argparse::ArgumentParser info_cmd("info");
+  info_cmd.add_description("显示存储信息");
+
+  // 添加子命令
+  program.add_subparser(list_cmd);
+  program.add_subparser(show_cmd);
+  program.add_subparser(delete_cmd);
+  program.add_subparser(clear_cmd);
+  program.add_subparser(info_cmd);
+
+  // 解析参数
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::exception& err) {
+    std::print(stderr, "错误: {}\n", err.what());
+    std::print(stderr, "\n{}", program.help().str());
     return 1;
   }
 
-  std::string cmd = argv[1];
-  bool skip_confirm = false;
+  bool skip_confirm = program.get<bool>("--yes");
 
-  // 检查全局选项
-  for (int i = 2; i < argc; i++) {
-    std::string arg = argv[i];
-    if (arg == "-y" || arg == "--yes") {
-      skip_confirm = true;
-    } else if (arg == "-h" || arg == "--help") {
-      print_usage(argv[0]);
-      return 0;
-    }
-  }
-
-  if (cmd == "-h" || cmd == "--help") {
-    print_usage(argv[0]);
-    return 0;
-  }
-
-  if (cmd == "info") {
+  // 处理子命令
+  if (program.is_subcommand_used("info")) {
     return cmd_info();
   }
 
@@ -341,53 +344,32 @@ int main(int argc, char* argv[]) {
   howdy::DBusClient client;
   bool connected = client.connect() && client.is_service_ready();
 
-  if (cmd == "list") {
+  if (program.is_subcommand_used("list")) {
     if (!connected) {
-      // 尝试不通过 daemon 读取（可能是明文）
       std::print("警告: daemon 服务未就绪，尝试直接读取...\n\n");
     }
     return cmd_list(client);
   }
 
-  if (cmd == "show") {
-    if (argc < 3) {
-      std::print(stderr, "错误: show 命令需要指定序号\n");
-      return 1;
-    }
+  if (program.is_subcommand_used("show")) {
     if (!connected) {
       std::print("警告: daemon 服务未就绪，尝试直接读取...\n\n");
     }
-    int index = 0;
-    auto [ptr, ec] =
-        std::from_chars(argv[2], argv[2] + std::strlen(argv[2]), index);
-    if (ec != std::errc{}) {
-      std::print(stderr, "错误: 无效的序号 '{}'\n", argv[2]);
-      return 1;
-    }
+    int index = show_cmd.get<int>("index");
     return cmd_show(client, index);
   }
 
-  if (cmd == "delete") {
-    if (argc < 3) {
-      std::print(stderr, "错误: delete 命令需要指定序号\n");
-      return 1;
-    }
+  if (program.is_subcommand_used("delete")) {
     if (!connected) {
       std::print(stderr, "错误: daemon 服务未就绪\n");
       std::print(stderr, "请确保 howdy-fido2-daemon 正在运行\n");
       return 1;
     }
-    int index = 0;
-    auto [ptr2, ec2] =
-        std::from_chars(argv[2], argv[2] + std::strlen(argv[2]), index);
-    if (ec2 != std::errc{}) {
-      std::print(stderr, "错误: 无效的序号 '{}'\n", argv[2]);
-      return 1;
-    }
+    int index = delete_cmd.get<int>("index");
     return cmd_delete(client, index, skip_confirm);
   }
 
-  if (cmd == "clear") {
+  if (program.is_subcommand_used("clear")) {
     if (!connected) {
       std::print(stderr, "错误: daemon 服务未就绪\n");
       std::print(stderr, "请确保 howdy-fido2-daemon 正在运行\n");
@@ -396,7 +378,7 @@ int main(int argc, char* argv[]) {
     return cmd_clear(client, skip_confirm);
   }
 
-  std::print(stderr, "错误: 未知命令 '{}'\n", cmd);
-  print_usage(argv[0]);
+  // 如果没有指定子命令，显示帮助
+  std::print(stderr, "{}", program.help().str());
   return 1;
 }

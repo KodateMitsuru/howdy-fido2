@@ -13,6 +13,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <argparse/argparse.hpp>
 #include <atomic>
 #include <csignal>
 #include <print>
@@ -28,34 +29,27 @@ void signal_handler(int signum) {
   g_running.store(false);
 }
 
-void print_usage(const char* program) {
-  std::print(
-      "用法: {} [选项]\n\n"
-      "选项:\n"
-      "  -D, --debug    启用调试输出\n"
-      "  -h, --help     显示此帮助信息\n\n"
-      "高权限守护进程，负责 UHID 和 TPM 操作。\n"
-      "需要 root 权限或对 /dev/uhid 和 TPM 的访问权限。\n\n"
-      "配合 howdy-fido2-client 使用进行 PAM 验证。\n",
-      program);
-}
-
 int main(int argc, char* argv[]) {
-  bool debug = false;
+  argparse::ArgumentParser program("howdy-fido2-daemon");
+  program.add_description(
+      "高权限守护进程，负责 UHID 和 TPM 操作。\n"
+      "需要 root 权限或对 /dev/uhid 和 TPM 的访问权限。\n"
+      "配合 howdy-fido2-client 使用进行 PAM 验证。");
 
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "-h" || arg == "--help") {
-      print_usage(argv[0]);
-      return 0;
-    } else if (arg == "-D" || arg == "--debug") {
-      debug = true;
-    } else {
-      spdlog::error("未知选项: {}", arg);
-      print_usage(argv[0]);
-      return 1;
-    }
+  program.add_argument("-D", "--debug")
+      .help("启用调试输出")
+      .default_value(false)
+      .implicit_value(true);
+
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::exception& err) {
+    std::print(stderr, "错误: {}\n", err.what());
+    std::print(stderr, "\n{}", program.help().str());
+    return 1;
   }
+
+  bool debug = program.get<bool>("--debug");
 
   spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
   spdlog::set_level(debug ? spdlog::level::debug : spdlog::level::info);
