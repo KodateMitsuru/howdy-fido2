@@ -1,12 +1,12 @@
 _pkgname=howdy-fido2
 pkgname=$_pkgname-git
-pkgver=0.1.1.r7.g5a4a24c
+pkgver=0.1.2.r2.g0e1d767
 pkgrel=1
 pkgdesc="Howdy FIDO2 Extension"
 arch=('x86_64')
 url="https://github.com/kodatemitsuru/howdy-fido2"
 license=('GPL-3.0')
-depends=('howdy' 'spdlog' 'libcbor' 'tpm2-tss' 'pam' 'openssl' 'sdbus-cpp')
+depends=('howdy' 'spdlog' 'libcbor' 'tpm2-tss' 'pam' 'openssl' 'sdbus-cpp' 'libfido2')
 makedepends=('cmake')
 source=("$_pkgname::git+https://github.com/kodatemitsuru/howdy-fido2.git")
 sha256sums=('SKIP')
@@ -28,6 +28,7 @@ build() {
 package() {
   DESTDIR="$pkgdir" cmake --install build --prefix /usr
   install -Dm644 "$srcdir/$_pkgname/pam.d/$_pkgname" "$pkgdir/etc/pam.d/$_pkgname"
+  install -Dm644 "$srcdir/$_pkgname/conf/config.conf" "$pkgdir/etc/howdy-fido2/config.conf"
   install -Dm644 "$srcdir/$_pkgname/dbus/org.howdy.Fido2.conf" "$pkgdir/usr/share/dbus-1/system.d/org.howdy.Fido2.conf"
   install -Dm644 "$srcdir/$_pkgname/systemd/howdy-fido2-daemon.service" "$pkgdir/usr/lib/systemd/system/howdy-fido2-daemon.service"
   install -Dm644 "$srcdir/$_pkgname/systemd/howdy-fido2-client.service" "$pkgdir/usr/lib/systemd/user/howdy-fido2-client.service"

@@ -20,6 +20,9 @@ pkg_check_modules(TSS2 REQUIRED tss2-esys tss2-mu)
 # sdbus-c++ 库 (D-Bus IPC)
 pkg_check_modules(SDBUS REQUIRED sdbus-c++)
 
+# libfido2 库 (FIDO2 设备检测)
+pkg_check_modules(LIBFIDO2 REQUIRED libfido2)
+
 # 核心库源文件（不含 main）
 set(CORE_SOURCES
     src/uhid_device.cpp
@@ -28,6 +31,8 @@ set(CORE_SOURCES
     src/crypto.cpp
     src/cbor_helper.cpp
     src/tpm_storage.cpp
+    src/config.cpp
+    src/device_detector.cpp
 )
 
 # D-Bus 接口源文件
@@ -42,6 +47,7 @@ include_directories(
     ${CBOR_INCLUDE_DIR} 
     ${TSS2_INCLUDE_DIRS}
     ${SDBUS_INCLUDE_DIRS}
+    ${LIBFIDO2_INCLUDE_DIRS}
 )
 
 # 创建核心库
@@ -53,6 +59,7 @@ target_link_libraries(howdy_fido2_core PUBLIC
     OpenSSL::SSL 
     OpenSSL::Crypto 
     spdlog::spdlog
+    ${LIBFIDO2_LIBRARIES}
     ${TSS2_LIBRARIES}
 )
 
@@ -102,7 +109,7 @@ if(BUILD_TESTS)
   function(howdy_add_test)
     cmake_parse_arguments(TEST "" "NAME" "SOURCES;LIBS" ${ARGN})
     add_executable(${TEST_NAME} ${TEST_SOURCES})
-    target_link_libraries(${TEST_NAME} PRIVATE ${TEST_LIBS} GTest::gtest_main)
+    target_link_libraries(${TEST_NAME} PRIVATE ${TEST_LIBS} GTest::gtest_main spdlog::spdlog)
     gtest_discover_tests(${TEST_NAME})
   endfunction()
 
@@ -120,6 +127,18 @@ if(BUILD_TESTS)
 
   howdy_add_test(NAME test_cbor
     SOURCES tests/test_cbor.cpp
+    LIBS howdy_fido2_core)
+
+  howdy_add_test(NAME test_config
+    SOURCES tests/test_config.cpp
+    LIBS howdy_fido2_core)
+
+  howdy_add_test(NAME test_device_detector
+    SOURCES tests/test_device_detector.cpp
+    LIBS howdy_fido2_core)
+
+  howdy_add_test(NAME test_device_policy
+    SOURCES tests/test_device_policy.cpp
     LIBS howdy_fido2_core)
 
   # Level 1 — TPM 访问

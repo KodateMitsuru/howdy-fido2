@@ -11,6 +11,8 @@
 
 #include "byte_utils.h"
 #include "cbor_helper.h"
+#include "config.h"
+#include "device_detector.h"
 #include "pam_auth.h"
 #include "tpm_storage.h"  // for CredentialSerializer
 
@@ -42,6 +44,9 @@ constexpr uint8_t CTAP2_ERR_NO_CREDENTIALS = 0x2E;
 constexpr uint8_t CTAP2_ERR_NOT_ALLOWED = 0x30;
 
 FIDO2Device::FIDO2Device() : rng_(std::random_device{}()) {
+  // 加载配置
+  load_config();
+
   // 生成 Attestation 密钥对
   if (!attestation_key_.generate()) {
     spdlog::warn("无法生成 Attestation 密钥");
@@ -67,6 +72,52 @@ bool FIDO2Device::start() {
 }
 
 void FIDO2Device::stop() { uhid_.destroy(); }
+
+void FIDO2Device::load_config(const std::string& path) {
+  auto loaded_config = Config::load(path);
+  if (loaded_config) {
+    config_ = *loaded_config;
+
+    // 根据配置更新设置
+    if (!config_.pam_service.empty()) {
+      pam_service_ = config_.pam_service;
+    }
+
+    spdlog::info("配置已加载: device_policy={}, pam_service={}",
+                 Config::policy_to_string(config_.device_policy),
+                 config_.pam_service);
+  } else {
+    spdlog::warn("无法加载配置文件，使用默认设置");
+  }
+}
+
+bool FIDO2Device::should_respond_to_request() {
+  // 根据配置的设备策略决定是否响应
+  switch (config_.device_policy) {
+    case DevicePolicy::ALWAYS_RESPOND:
+      spdlog::debug("设备策略: ALWAYS_RESPOND - 总是响应");
+      return true;
+
+    case DevicePolicy::FALLBACK: {
+      // 检测是否有其他 FIDO2 设备
+      auto other_devices = DeviceDetector::detect_other_devices();
+      if (!other_devices.empty()) {
+        spdlog::info("检测到 {} 个其他 FIDO2 设备，根据 FALLBACK 策略静默回避",
+                     other_devices.size());
+        for (const auto& dev : other_devices) {
+          spdlog::debug("  - {} (VID:{:04X} PID:{:04X})", dev.product_name,
+                        dev.vendor_id, dev.product_id);
+        }
+        return false;
+      }
+      spdlog::debug("设备策略: FALLBACK - 无其他设备，响应请求");
+      return true;
+    }
+
+    default:
+      return true;
+  }
+}
 
 void FIDO2Device::handle_ctaphid_message(const std::vector<uint8_t>& data) {
   // 调试：打印原始数据
@@ -331,8 +382,14 @@ void FIDO2Device::handle_cbor(uint32_t channel_id,
       break;
   }
 
+  // 如果响应为空，表示需要静默（不发送任何数据）
+  if (response.empty()) {
+    spdlog::info("CTAP2: 静默模式 - 不发送响应，让其他设备处理");
+    return;
+  }
+
   spdlog::info("CTAP2: <<< 发送响应 {} 字节 (状态码: 0x{:02X})",
-               response.size(), response.empty() ? 0xFF : response[0]);
+               response.size(), response[0]);
   send_response(channel_id, CTAPHIDCommand::CBOR, response);
 }
 
@@ -719,6 +776,12 @@ std::vector<uint8_t> FIDO2Device::handle_get_assertion(
   // 计算 rp_id_hash（提前检查凭据）
   std::vector<uint8_t> rp_id_bytes(req.rp_id.begin(), req.rp_id.end());
   std::vector<uint8_t> rp_id_hash = CryptoUtils::sha256(rp_id_bytes);
+
+  // 检查是否应该响应此请求（根据配置和其他设备情况）
+  if (!should_respond_to_request()) {
+    spdlog::info("CTAP2: 根据设备策略，本设备不响应请求");
+    return {};  // 返回空响应，表示静默
+  }
 
   // 先检查是否有匹配的凭据（在验证用户之前）
   // 这样如果没有凭据，可以静默让其他设备处理

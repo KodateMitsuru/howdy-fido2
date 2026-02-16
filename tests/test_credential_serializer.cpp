@@ -1,10 +1,16 @@
 #include <gtest/gtest.h>
+#include <spdlog/spdlog.h>
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include "tpm_storage.h"
+
+// 设置日志级别为 debug 以便调试
+static struct LogInitializer {
+  LogInitializer() { spdlog::set_level(spdlog::level::debug); }
+} log_init;
 
 using namespace howdy;
 using Credential = CredentialSerializer::Credential;

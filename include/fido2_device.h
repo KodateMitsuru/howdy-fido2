@@ -9,6 +9,7 @@
 #include <random>
 #include <span>
 
+#include "config.h"
 #include "crypto.h"
 #include "uhid_device.h"
 
@@ -55,6 +56,12 @@ class FIDO2Device {
   // 设置 PAM 服务名（用于内置 PAM 模式）
   void set_pam_service(const std::string& service) { pam_service_ = service; }
 
+  // 加载配置文件
+  void load_config(const std::string& path = "/etc/howdy-fido2/config.conf");
+
+  // 获取当前配置
+  const Config& get_config() const { return config_; }
+
  private:
   // CTAPHID 协议处理
   void handle_ctaphid_message(const std::vector<uint8_t>& data);
@@ -92,6 +99,9 @@ class FIDO2Device {
   // 处理完整消息
   void process_complete_message(uint32_t channel_id, uint8_t cmd,
                                 const std::vector<uint8_t>& data);
+
+  // 检查是否应该响应（根据配置和其他设备情况）
+  bool should_respond_to_request();
 
   UHIDDevice uhid_;
   std::flat_set<uint32_t> active_channels_;
@@ -143,6 +153,9 @@ class FIDO2Device {
   static constexpr int VERIFICATION_TIMEOUT_SECONDS = 30;
   std::mutex verification_mutex_;
   bool verification_in_progress_ = false;
+
+  // 配置
+  Config config_;
 };
 
 }  // namespace howdy

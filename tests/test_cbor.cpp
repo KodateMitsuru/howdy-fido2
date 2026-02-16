@@ -1,5 +1,6 @@
 #include <cbor.h>
 #include <gtest/gtest.h>
+#include <spdlog/spdlog.h>
 
 #include <cstdint>
 #include <flat_map>
@@ -7,6 +8,11 @@
 #include <vector>
 
 #include "cbor_helper.h"
+
+// 设置日志级别为 debug 以便调试
+static struct LogInitializer {
+  LogInitializer() { spdlog::set_level(spdlog::level::debug); }
+} log_init;
 #include "fido2_device.h"  // for AAGUID
 
 using namespace howdy;
