@@ -135,11 +135,11 @@ int cmd_list(howdy::DBusClient& client) {
   for (const auto& cred : credentials) {
     std::string rp_display = cred.rp_id;
     if (rp_display.length() > 28) {
-      rp_display = rp_display.substr(0, 25) + "...";
+      rp_display = std::format("{}...", rp_display.substr(0, 25));
     }
     std::string user_display = cred.user_name;
     if (user_display.length() > 18) {
-      user_display = user_display.substr(0, 15) + "...";
+      user_display = std::format("{}...", user_display.substr(0, 15));
     }
     std::print("{:>4}  {:<30}  {:<20}  {:>8}\n", index++, rp_display,
                user_display, cred.counter);
